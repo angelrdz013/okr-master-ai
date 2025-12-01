@@ -9,3 +9,4 @@ ReactDOM.createRoot(
     <AuthGate />
   </React.StrictMode>
 );
+
