@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig(() => {
   return {
-    base: '/okr-master-ai/', // 👈 nombre EXACTO del repo en GitHub
+    base: '/', // 👈 nombre EXACTO del repo en GitHub
 
     server: {
       port: 3000,
