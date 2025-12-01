@@ -119,7 +119,18 @@ function App() {
     setDraftOkr(undefined);
     setView(editingOkrId ? 'detail' : 'dashboard');
   };
-
+  const handleLogout = async () => {
+  try {
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      console.error("Error al cerrar sesión:", error.message);
+      alert("Hubo un problema al cerrar sesión. Revisa la consola.");
+    }
+  } catch (err: any) {
+    console.error("Error inesperado al cerrar sesión:", err);
+    alert("Error inesperado al cerrar sesión. Revisa la consola.");
+  }
+};
   const calculateProgress = (objective: Objective) => {
     if (objective.keyResults.length === 0) return 0;
     const total = objective.keyResults.reduce((acc, kr) => {
