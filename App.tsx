@@ -1,3 +1,5 @@
+import { supabase } from "./supabaseClient";
+import { LogOut } from "lucide-react";
 import React, { useState, useEffect, useMemo } from 'react';
 import { Objective, User } from './types';
 import Wizard from './components/Wizard';
