@@ -9,13 +9,13 @@ const AuthGate: React.FC = () => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Obtener sesión inicial
+    // Sesión inicial
     supabase.auth.getSession().then(({ data }) => {
       setSession(data.session);
       setLoading(false);
     });
 
-    // Escuchar cambios (login/logout)
+    // Escuchar cambios de auth
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, newSession) => {
@@ -40,7 +40,6 @@ const AuthGate: React.FC = () => {
     return <Login />;
   }
 
-  // Más adelante aquí podríamos cargar el profile, org, etc.
   return <App />;
 };
 
