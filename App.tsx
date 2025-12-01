@@ -1,11 +1,20 @@
+import React, { useState, useEffect, useMemo } from "react";
 import { supabase } from "./supabaseClient";
 import { LogOut } from "lucide-react";
-import React, { useState, useEffect, useMemo } from 'react';
-import { Objective, User } from './types';
-import Wizard from './components/Wizard';
-import OkrDetail from './components/OkrDetail';
-import MonthlyReportModal from './components/MonthlyReport';
-import { PlusCircle, Target, Trophy, ChevronRight, FileText, CheckCircle2, XCircle, Layout } from 'lucide-react';
+import { Objective, User } from "./types";
+import Wizard from "./components/Wizard";
+import OkrDetail from "./components/OkrDetail";
+import MonthlyReportModal from "./components/MonthlyReport";
+import {
+  PlusCircle,
+  Target,
+  Trophy,
+  ChevronRight,
+  FileText,
+  CheckCircle2,
+  XCircle,
+  Layout,
+} from "lucide-react";
 
 // Utility for ID generation
 const generateId = () => Math.random().toString(36).substr(2, 9);
@@ -13,32 +22,36 @@ const generateId = () => Math.random().toString(36).substr(2, 9);
 interface Toast {
   id: string;
   message: string;
-  type: 'success' | 'error';
+  type: "success" | "error";
 }
 
-type TabView = 'my-okrs';
+type TabView = "my-okrs";
 
-// Usuario único por defecto (ajusta nombre/rol/color/avatar a tu gusto)
+// Usuario único por defecto
 const DEFAULT_USER: User = {
-  id: 'current-user',
-  name: 'Mi usuario',
-  role: 'Owner',
+  id: "current-user",
+  name: "Mi usuario",
+  role: "Owner",
   managerId: null,
-  color: 'bg-indigo-600',
-  avatar: 'MU',
+  color: "bg-indigo-600",
+  avatar: "MU",
 };
 
 function App() {
-  const [view, setView] = useState<'dashboard' | 'create' | 'detail'>('dashboard');
-  const [activeTab, setActiveTab] = useState<TabView>('my-okrs');
+  const [view, setView] = useState<"dashboard" | "create" | "detail">(
+    "dashboard"
+  );
+  const [activeTab, setActiveTab] = useState<TabView>("my-okrs");
   const [showReport, setShowReport] = useState(false);
 
-  // User State: un solo usuario
+  // User State: un solo usuario (por ahora, mientras conectamos Supabase a OKRs)
   const [currentUser] = useState<User>(DEFAULT_USER);
 
-  // Data State - solo localStorage; si no hay nada, arranca vacío
+  // Data State - sólo localStorage; si no hay nada, arranca vacío
   const [allObjectives, setAllObjectives] = useState<Objective[]>(() => {
-    const saved = localStorage.getItem('okr-master-db');
+    const saved = typeof window !== "undefined"
+      ? window.localStorage.getItem("okr-master-db")
+      : null;
     return saved ? JSON.parse(saved) : [];
   });
 
@@ -47,38 +60,66 @@ function App() {
   const [draftOkr, setDraftOkr] = useState<Objective | undefined>(undefined);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  // Persistence
+  // Persistencia en localStorage
   useEffect(() => {
-    localStorage.setItem('okr-master-db', JSON.stringify(allObjectives));
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("okr-master-db", JSON.stringify(allObjectives));
+    }
   }, [allObjectives]);
 
   // Mis OKRs (solo del usuario actual)
   const myOkrs = useMemo(
-    () => allObjectives.filter(o => o.ownerId === currentUser.id),
+    () => allObjectives.filter((o) => o.ownerId === currentUser.id),
     [allObjectives, currentUser]
   );
 
-  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
+  // Toast helper
+  const showToast = (
+    message: string,
+    type: "success" | "error" = "success"
+  ) => {
     const id = generateId();
-    setToasts(prev => [...prev, { id, message, type }]);
+    setToasts((prev) => [...prev, { id, message, type }]);
     setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== id));
+      setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 3000);
   };
 
-  const handleSaveOkr = (partialOkr: Omit<Objective, 'id' | 'createdAt' | 'lastCoaching'>) => {
+  // Logout
+  const handleLogout = async () => {
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) {
+        console.error("Error al cerrar sesión:", error.message);
+        showToast("Hubo un problema al cerrar sesión", "error");
+      }
+      // AuthGate detecta la sesión null y nos manda al Login
+    } catch (err: any) {
+      console.error("Error inesperado al cerrar sesión:", err);
+      showToast("Error inesperado al cerrar sesión", "error");
+    }
+  };
+
+  const handleSaveOkr = (
+    partialOkr: Omit<Objective, "id" | "createdAt" | "lastCoaching">
+  ) => {
     if (editingOkrId) {
       // Update existing
-      const existing = allObjectives.find(o => o.id === editingOkrId);
+      const existing = allObjectives.find((o) => o.id === editingOkrId);
       if (!existing) return;
 
       const updatedOkr: Objective = {
         ...existing,
         ...partialOkr,
-        keyResults: partialOkr.keyResults.map(kr => ({ ...kr, id: kr.id || generateId() })),
+        keyResults: partialOkr.keyResults.map((kr) => ({
+          ...kr,
+          id: kr.id || generateId(),
+        })),
       };
-      setAllObjectives(prev => prev.map(o => (o.id === editingOkrId ? updatedOkr : o)));
-      showToast('OKR actualizado correctamente');
+      setAllObjectives((prev) =>
+        prev.map((o) => (o.id === editingOkrId ? updatedOkr : o))
+      );
+      showToast("OKR actualizado correctamente");
       setEditingOkrId(null);
     } else {
       // Create new
@@ -87,71 +128,78 @@ function App() {
         id: generateId(),
         ownerId: currentUser.id,
         createdAt: Date.now(),
-        keyResults: partialOkr.keyResults.map(kr => ({ ...kr, id: generateId() })),
+        keyResults: partialOkr.keyResults.map((kr) => ({
+          ...kr,
+          id: generateId(),
+        })),
       };
-      setAllObjectives(prev => [newOkr, ...prev]);
-      showToast('OKR creado exitosamente');
+      setAllObjectives((prev) => [newOkr, ...prev]);
+      showToast("OKR creado exitosamente");
     }
     setDraftOkr(undefined);
-    setView('dashboard');
+    setView("dashboard");
   };
 
   const handleUpdateOkr = (updatedOkr: Objective) => {
-    setAllObjectives(prev => prev.map(o => (o.id === updatedOkr.id ? updatedOkr : o)));
+    setAllObjectives((prev) =>
+      prev.map((o) => (o.id === updatedOkr.id ? updatedOkr : o))
+    );
   };
 
   const handleDeleteOkr = (id: string) => {
-    if (window.confirm('¿Estás seguro de eliminar este OKR?')) {
-      setAllObjectives(prev => prev.filter(o => o.id !== id));
-      setView('dashboard');
+    if (window.confirm("¿Estás seguro de eliminar este OKR?")) {
+      setAllObjectives((prev) => prev.filter((o) => o.id !== id));
+      setView("dashboard");
       setSelectedOkrId(null);
-      showToast('OKR eliminado');
+      showToast("OKR eliminado");
     }
   };
 
   const handleEditOkr = (okr: Objective) => {
     setEditingOkrId(okr.id);
-    setView('create');
+    setView("create");
   };
 
   const handleCancelWizard = () => {
     setEditingOkrId(null);
     setDraftOkr(undefined);
-    setView(editingOkrId ? 'detail' : 'dashboard');
+    setView(editingOkrId ? "detail" : "dashboard");
   };
-  const handleLogout = async () => {
-  try {
-    const { error } = await supabase.auth.signOut();
-    if (error) {
-      console.error("Error al cerrar sesión:", error.message);
-      alert("Hubo un problema al cerrar sesión. Revisa la consola.");
-    }
-  } catch (err: any) {
-    console.error("Error inesperado al cerrar sesión:", err);
-    alert("Error inesperado al cerrar sesión. Revisa la consola.");
-  }
-};
+
   const calculateProgress = (objective: Objective) => {
     if (objective.keyResults.length === 0) return 0;
     const total = objective.keyResults.reduce((acc, kr) => {
-      const p = Math.min(100, Math.max(0, (kr.currentValue / kr.targetValue) * 100));
+      const p = Math.min(
+        100,
+        Math.max(0, (kr.currentValue / kr.targetValue) * 100)
+      );
       return acc + p;
     }, 0);
     return Math.round(total / objective.keyResults.length);
   };
 
-  const selectedOkr = allObjectives.find(o => o.id === selectedOkrId);
-  const okrToEdit = editingOkrId ? allObjectives.find(o => o.id === editingOkrId) : draftOkr;
+  const selectedOkr = allObjectives.find((o) => o.id === selectedOkrId);
+  const okrToEdit = editingOkrId
+    ? allObjectives.find((o) => o.id === editingOkrId)
+    : draftOkr;
 
-  // Render Helper for OKR Card
-  const renderOkrCard = (okr: Objective, onClick?: () => void, readOnly: boolean = false) => {
+  // Render Helper para card de OKR
+  const renderOkrCard = (
+    okr: Objective,
+    onClick?: () => void,
+    readOnly: boolean = false
+  ) => {
     const progress = calculateProgress(okr);
     return (
       <div
         key={okr.id}
         onClick={onClick}
         className={`bg-white p-6 rounded-xl border border-slate-200 shadow-sm transition-all relative overflow-hidden group
-          ${onClick ? 'hover:shadow-md hover:border-indigo-300 cursor-pointer' : ''}`}
+          ${
+            onClick
+              ? "hover:shadow-md hover:border-indigo-300 cursor-pointer"
+              : ""
+          }`}
       >
         {onClick && (
           <div className="absolute top-0 left-0 w-1 h-full bg-indigo-500 opacity-0 group-hover:opacity-100 transition-opacity" />
@@ -160,34 +208,42 @@ function App() {
         <div className="flex justify-between items-start mb-4">
           <span
             className={`inline-block px-2.5 py-0.5 rounded-md text-xs font-bold uppercase tracking-wider ${
-              okr.category === 'Business'
-                ? 'bg-blue-100 text-blue-700'
-                : okr.category === 'Personal'
-                ? 'bg-purple-100 text-purple-700'
-                : okr.category === 'Health'
-                ? 'bg-green-100 text-green-700'
-                : 'bg-orange-100 text-orange-700'
+              okr.category === "Business"
+                ? "bg-blue-100 text-blue-700"
+                : okr.category === "Personal"
+                ? "bg-purple-100 text-purple-700"
+                : okr.category === "Health"
+                ? "bg-green-100 text-green-700"
+                : "bg-orange-100 text-orange-700"
             }`}
           >
-            {okr.category === 'Business'
-              ? 'Negocios'
-              : okr.category === 'Personal'
-              ? 'Personal'
-              : okr.category === 'Health'
-              ? 'Salud'
-              : 'Aprendizaje'}
+            {okr.category === "Business"
+              ? "Negocios"
+              : okr.category === "Personal"
+              ? "Personal"
+              : okr.category === "Health"
+              ? "Salud"
+              : "Aprendizaje"}
           </span>
-          {onClick && <ChevronRight className="w-5 h-5 text-slate-300 group-hover:text-indigo-500 transition-colors" />}
+          {onClick && (
+            <ChevronRight className="w-5 h-5 text-slate-300 group-hover:text-indigo-500 transition-colors" />
+          )}
         </div>
 
-        <h3 className="font-bold text-lg text-slate-800 mb-4 line-clamp-2 h-14 leading-tight">{okr.title}</h3>
+        <h3 className="font-bold text-lg text-slate-800 mb-4 line-clamp-2 h-14 leading-tight">
+          {okr.title}
+        </h3>
 
         <div className="space-y-3">
           <div className="flex justify-between text-sm text-slate-500">
             <span>Progreso general</span>
             <span
               className={`font-bold ${
-                progress >= 70 ? 'text-emerald-600' : progress >= 40 ? 'text-amber-500' : 'text-slate-600'
+                progress >= 70
+                  ? "text-emerald-600"
+                  : progress >= 40
+                  ? "text-amber-500"
+                  : "text-slate-600"
               }`}
             >
               {progress}%
@@ -196,7 +252,11 @@ function App() {
           <div className="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden">
             <div
               className={`h-full rounded-full transition-all duration-1000 ease-out ${
-                progress >= 70 ? 'bg-emerald-500' : progress >= 40 ? 'bg-amber-500' : 'bg-indigo-500'
+                progress >= 70
+                  ? "bg-emerald-500"
+                  : progress >= 40
+                  ? "bg-amber-500"
+                  : "bg-indigo-500"
               }`}
               style={{ width: `${progress}%` }}
             />
@@ -204,7 +264,11 @@ function App() {
           {!readOnly && (
             <div className="text-xs text-slate-400 pt-1 flex justify-between items-center">
               <span>{okr.keyResults.length} Key Results</span>
-              {okr.lastCoaching && <span className="text-indigo-600 font-medium">Feedback recibido</span>}
+              {okr.lastCoaching && (
+                <span className="text-indigo-600 font-medium">
+                  Feedback recibido
+                </span>
+              )}
             </div>
           )}
           {readOnly && (
@@ -221,14 +285,14 @@ function App() {
     <div className="min-h-screen bg-slate-50 text-slate-900 pb-20 font-sans">
       {/* Toast Container */}
       <div className="fixed bottom-4 right-4 z-[60] flex flex-col gap-2">
-        {toasts.map(toast => (
+        {toasts.map((toast) => (
           <div
             key={toast.id}
             className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-white font-medium text-sm animate-fadeIn ${
-              toast.type === 'success' ? 'bg-slate-800' : 'bg-red-500'
+              toast.type === "success" ? "bg-slate-800" : "bg-red-500"
             }`}
           >
-            {toast.type === 'success' ? (
+            {toast.type === "success" ? (
               <CheckCircle2 className="w-4 h-4 text-emerald-400" />
             ) : (
               <XCircle className="w-4 h-4" />
@@ -244,17 +308,18 @@ function App() {
           <div
             className="flex items-center gap-2 font-bold text-xl text-indigo-600 cursor-pointer hover:opacity-80 transition-opacity"
             onClick={() => {
-              setView('dashboard');
+              setView("dashboard");
               setEditingOkrId(null);
-              setActiveTab('my-okrs');
+              setActiveTab("my-okrs");
             }}
           >
             <Trophy className="w-6 h-6" />
             <span className="hidden sm:inline">OKR Master AI</span>
             <span className="sm:hidden">OKR AI</span>
           </div>
+
           <div className="flex gap-4 items-center">
-            {/* User info simple */}
+            {/* Info de usuario simple */}
             <div className="flex items-center gap-2 bg-slate-100 rounded-lg px-3 py-1">
               <div
                 className={`w-8 h-8 rounded-md flex items-center justify-center text-xs font-bold ${currentUser.color}`}
@@ -262,46 +327,65 @@ function App() {
                 {currentUser.avatar}
               </div>
               <div className="flex flex-col">
-                <span className="text-sm font-medium text-slate-700">{currentUser.name}</span>
-                <span className="text-[11px] text-slate-500">{currentUser.role}</span>
+                <span className="text-sm font-medium text-slate-700">
+                  {currentUser.name}
+                </span>
+                <span className="text-[11px] text-slate-500">
+                  {currentUser.role}
+                </span>
               </div>
             </div>
 
-            {view === 'dashboard' && myOkrs.length > 0 && activeTab === 'my-okrs' && (
-              <button
-                onClick={() => setShowReport(true)}
-                className="text-slate-600 hover:text-indigo-600 text-sm font-medium py-2 px-3 rounded-lg flex items-center gap-2 transition-colors border border-transparent hover:border-slate-200 hover:bg-slate-50"
-              >
-                <FileText className="w-4 h-4" />
-                <span className="hidden sm:inline">Reporte</span>
-              </button>
-            )}
-            {view === 'dashboard' && activeTab === 'my-okrs' && (
+            {/* Botón Salir */}
+            <button
+              onClick={handleLogout}
+              className="text-slate-500 hover:text-red-600 text-xs sm:text-sm flex items-center gap-1 border border-slate-200 hover:border-red-200 rounded-lg px-2 py-1"
+            >
+              <LogOut className="w-3 h-3" />
+              <span className="hidden sm:inline">Salir</span>
+            </button>
+
+            {/* Botón Reporte */}
+            {view === "dashboard" &&
+              myOkrs.length > 0 &&
+              activeTab === "my-okrs" && (
+                <button
+                  onClick={() => setShowReport(true)}
+                  className="text-slate-600 hover:text-indigo-600 text-sm font-medium py-2 px-3 rounded-lg flex items-center gap-2 transition-colors border border-transparent hover:border-slate-200 hover:bg-slate-50"
+                >
+                  <FileText className="w-4 h-4" />
+                  <span className="hidden sm:inline">Reporte</span>
+                </button>
+              )}
+
+            {/* Botón Nuevo OKR */}
+            {view === "dashboard" && activeTab === "my-okrs" && (
               <button
                 onClick={() => {
                   setEditingOkrId(null);
                   setDraftOkr(undefined);
-                  setView('create');
+                  setView("create");
                 }}
                 className="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold py-2 px-4 rounded-lg flex items-center gap-2 transition-colors shadow-sm"
               >
-                <PlusCircle className="w-4 h-4" /> <span className="hidden sm:inline">Nuevo OKR</span>
+                <PlusCircle className="w-4 h-4" />
+                <span className="hidden sm:inline">Nuevo OKR</span>
                 <span className="sm:hidden">Nuevo</span>
               </button>
             )}
           </div>
         </div>
 
-        {/* Navigation Tabs (solo Mis OKRs) */}
-        {view === 'dashboard' && (
+        {/* Tabs (solo Mis OKRs) */}
+        {view === "dashboard" && (
           <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="flex space-x-6 overflow-x-auto no-scrollbar">
               <button
-                onClick={() => setActiveTab('my-okrs')}
+                onClick={() => setActiveTab("my-okrs")}
                 className={`py-3 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap ${
-                  activeTab === 'my-okrs'
-                    ? 'border-indigo-600 text-indigo-600'
-                    : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+                  activeTab === "my-okrs"
+                    ? "border-indigo-600 text-indigo-600"
+                    : "border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300"
                 }`}
               >
                 <Layout className="w-4 h-4" /> Mis OKRs ({myOkrs.length})
@@ -312,15 +396,15 @@ function App() {
       </header>
 
       <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {view === 'dashboard' && (
+        {view === "dashboard" && (
           <div className="space-y-6 animate-fadeIn">
             {/* MY OKRS TAB */}
-            {activeTab === 'my-okrs' && (
+            {activeTab === "my-okrs" && (
               <>
                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4 mb-2">
                   <div>
                     <h1 className="text-2xl font-bold text-slate-900">
-                      Hola, {currentUser.name.split(' ')[0]}
+                      Hola, {currentUser.name.split(" ")[0]}
                     </h1>
                     <p className="text-slate-500 mt-1">
                       Aquí están tus objetivos para este ciclo.
@@ -333,12 +417,15 @@ function App() {
                     <div className="bg-indigo-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
                       <Target className="w-8 h-8 text-indigo-500" />
                     </div>
-                    <h3 className="text-lg font-medium text-slate-900">No tienes OKRs aún</h3>
+                    <h3 className="text-lg font-medium text-slate-900">
+                      No tienes OKRs aún
+                    </h3>
                     <p className="text-slate-500 mt-2 mb-6 max-w-sm mx-auto">
-                      Crea tu primer OKR y deja que la IA te ayude a aterrizar tus metas.
+                      Crea tu primer OKR y deja que la IA te ayude a aterrizar
+                      tus metas.
                     </p>
                     <button
-                      onClick={() => setView('create')}
+                      onClick={() => setView("create")}
                       className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-6 rounded-lg shadow-md transition-all hover:-translate-y-0.5"
                     >
                       Crear mi primer OKR
@@ -346,10 +433,10 @@ function App() {
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {myOkrs.map(okr =>
+                    {myOkrs.map((okr) =>
                       renderOkrCard(okr, () => {
                         setSelectedOkrId(okr.id);
-                        setView('detail');
+                        setView("detail");
                       })
                     )}
                   </div>
@@ -359,14 +446,18 @@ function App() {
           </div>
         )}
 
-        {view === 'create' && (
-          <Wizard initialData={okrToEdit} onSave={handleSaveOkr} onCancel={handleCancelWizard} />
+        {view === "create" && (
+          <Wizard
+            initialData={okrToEdit}
+            onSave={handleSaveOkr}
+            onCancel={handleCancelWizard}
+          />
         )}
 
-        {view === 'detail' && selectedOkr && (
+        {view === "detail" && selectedOkr && (
           <OkrDetail
             objective={selectedOkr}
-            onBack={() => setView('dashboard')}
+            onBack={() => setView("dashboard")}
             onUpdate={handleUpdateOkr}
             onDelete={handleDeleteOkr}
             onEdit={handleEditOkr}
@@ -375,7 +466,10 @@ function App() {
       </main>
 
       {showReport && (
-        <MonthlyReportModal objectives={myOkrs} onClose={() => setShowReport(false)} />
+        <MonthlyReportModal
+          objectives={myOkrs}
+          onClose={() => setShowReport(false)}
+        />
       )}
     </div>
   );
