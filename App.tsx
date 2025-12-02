@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { supabase } from "./supabaseClient";
 import { LogOut } from "lucide-react";
-import { Objective, User } from "./types";
+import { Objective, User, AppRole } from "./types";
 import Wizard from "./components/Wizard";
 import OkrDetail from "./components/OkrDetail";
 import MonthlyReportModal from "./components/MonthlyReport";
@@ -25,23 +25,27 @@ interface Toast {
   type: "success" | "error";
 }
 
-type TabView = "my-okrs";
+// 👉 Ahora tenemos más tabs
+type TabView = "my-okrs" | "team" | "alignment" | "reports";
 
 // Usuario por defecto mientras cargamos de Supabase
 const DEFAULT_USER: User = {
   id: "current-user",
   name: "Mi usuario",
-  role: "Owner",
+  role: "Owner", // Job title de relleno
   managerId: null,
   color: "bg-indigo-600",
   avatar: "MU",
+  appRole: "owner", // 👈 rol en la app
 };
 
 // Tipos para filas de BD
 type DBProfile = {
   id: string;
   full_name: string | null;
-  role: string | null;
+  role: string | null; // Job title
+  app_role: string | null; // "owner" | "manager" | "employee"
+  manager_id: string | null;
   organization_id: string | null;
   created_at: string;
 };
@@ -142,23 +146,36 @@ function App() {
           user.email?.split("@")[0] ||
           "Mi usuario";
 
+        // role = Job Title
         let role = (metadata.role as string) || "Owner";
         let orgId: string | null = null;
+        let managerId: string | null = null;
+        let appRole: AppRole = "employee";
 
         // Intentar leer profile real
         const { data: profile, error: profileError } = await supabase
           .from("profiles")
-          .select("id, full_name, role, organization_id, created_at")
+          .select(
+            "id, full_name, role, app_role, manager_id, organization_id, created_at"
+          )
           .eq("id", user.id)
           .maybeSingle<DBProfile>();
 
         if (profileError) {
-          // 406/No rows está bien, usamos metadata
           console.warn("Error cargando profile:", profileError.message);
         } else if (profile) {
           if (profile.full_name) fullName = profile.full_name;
           if (profile.role) role = profile.role;
           if (profile.organization_id) orgId = profile.organization_id;
+          if (profile.manager_id) managerId = profile.manager_id;
+          if (profile.app_role) {
+            appRole = profile.app_role as AppRole;
+          }
+        }
+
+        // Si no viene de profile, intentamos metadata
+        if (!profile?.app_role && metadata.app_role) {
+          appRole = metadata.app_role as AppRole;
         }
 
         const initials = fullName
@@ -170,13 +187,15 @@ function App() {
           .slice(0, 2)
           .toUpperCase();
 
-        setCurrentUser((prev) => ({
-          ...prev,
+        setCurrentUser({
           id: user.id,
           name: fullName,
-          role,
+          role, // Job title
           avatar: initials,
-        }));
+          color: "bg-indigo-600",
+          managerId,
+          appRole,
+        });
         setOrganizationId(orgId);
       } catch (err) {
         console.error("Error inesperado cargando usuario:", err);
@@ -269,6 +288,29 @@ function App() {
     () => allObjectives.filter((o) => o.ownerId === currentUser.id),
     [allObjectives, currentUser]
   );
+
+  // 👉 Tabs disponibles
+  const availableTabs: { id: TabView; label: string }[] = [
+    { id: "my-okrs", label: "Mis OKRs" },
+    { id: "team", label: "Mi equipo" },
+    { id: "alignment", label: "Alineación" },
+    { id: "reports", label: "Reportes" },
+  ];
+
+  // 👉 Tabs visibles según rol en la app
+  const tabsForUser = useMemo(() => {
+    const tabs: TabView[] = ["my-okrs"];
+
+    if (currentUser.appRole === "manager" || currentUser.appRole === "owner") {
+      tabs.push("team");
+    }
+
+    if (currentUser.appRole === "owner") {
+      tabs.push("alignment", "reports");
+    }
+
+    return tabs;
+  }, [currentUser.appRole]);
 
   // Toast helper
   const showToast = (
@@ -746,20 +788,32 @@ function App() {
           </div>
         </div>
 
-        {/* Tabs (solo Mis OKRs) */}
+        {/* Tabs: ahora dinámicos según appRole */}
         {view === "dashboard" && (
           <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="flex space-x-6 overflow-x-auto no-scrollbar">
-              <button
-                onClick={() => setActiveTab("my-okrs")}
-                className={`py-3 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap ${
-                  activeTab === "my-okrs"
-                    ? "border-indigo-600 text-indigo-600"
-                    : "border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300"
-                }`}
-              >
-                <Layout className="w-4 h-4" /> Mis OKRs ({myOkrs.length})
-              </button>
+              {availableTabs
+                .filter((t) => tabsForUser.includes(t.id))
+                .map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setActiveTab(tab.id)}
+                    className={`py-3 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap ${
+                      activeTab === tab.id
+                        ? "border-indigo-600 text-indigo-600"
+                        : "border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300"
+                    }`}
+                  >
+                    {/* Iconito según el tab */}
+                    {tab.id === "my-okrs" && <Layout className="w-4 h-4" />}
+                    {tab.id === "team" && <Target className="w-4 h-4" />}
+                    {tab.id === "alignment" && <Layout className="w-4 h-4" />}
+                    {tab.id === "reports" && <FileText className="w-4 h-4" />}
+
+                    {tab.label}
+                    {tab.id === "my-okrs" && ` (${myOkrs.length})`}
+                  </button>
+                ))}
             </div>
           </div>
         )}
@@ -816,6 +870,49 @@ function App() {
                   </div>
                 )}
               </>
+            )}
+
+            {/* TEAM TAB (placeholder por ahora) */}
+            {activeTab === "team" && (
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+                <h2 className="text-xl font-bold text-slate-900 mb-2">
+                  Mi equipo
+                </h2>
+                <p className="text-slate-500 text-sm">
+                  Aquí podrás ver los OKRs de tu equipo cuando conectemos la
+                  lógica de manager/colaboradores. Por ahora, esta sección es
+                  solo visible para <strong>Managers</strong> y{" "}
+                  <strong>Owners</strong>.
+                </p>
+              </div>
+            )}
+
+            {/* ALIGNMENT TAB (placeholder) */}
+            {activeTab === "alignment" && (
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+                <h2 className="text-xl font-bold text-slate-900 mb-2">
+                  Alineación
+                </h2>
+                <p className="text-slate-500 text-sm">
+                  Vista de alineación de objetivos a nivel organización. Solo
+                  Owners pueden ver esta pestaña. Más adelante aquí puedes
+                  mostrar cómo los OKRs se conectan entre sí.
+                </p>
+              </div>
+            )}
+
+            {/* REPORTS TAB (placeholder) */}
+            {activeTab === "reports" && (
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+                <h2 className="text-xl font-bold text-slate-900 mb-2">
+                  Reportes
+                </h2>
+                <p className="text-slate-500 text-sm">
+                  Espacio para reportes ejecutivos, resúmenes mensuales y
+                  exportables. Por ahora está como placeholder, pero solo es
+                  visible para Owners.
+                </p>
+              </div>
             )}
           </div>
         )}
