@@ -33,7 +33,6 @@ const DEFAULT_USER: User = {
   id: "current-user",
   name: "Mi usuario",
   role: "Owner", // Job title de relleno
-  managerId: null,
   color: "bg-indigo-600",
   avatar: "MU",
   appRole: "owner", // 👈 rol en la app
@@ -43,9 +42,8 @@ const DEFAULT_USER: User = {
 type DBProfile = {
   id: string;
   full_name: string | null;
-  role: string | null; // Job title
-  app_role: string | null; // "owner" | "manager" | "employee"
-  manager_id: string | null;
+  role: string | null;          // job title
+  app_role: string | null;      // "owner" | "manager" | "employee"
   organization_id: string | null;
   created_at: string;
 };
@@ -149,15 +147,12 @@ function App() {
         // role = Job Title
         let role = (metadata.role as string) || "Owner";
         let orgId: string | null = null;
-        let managerId: string | null = null;
         let appRole: AppRole = "employee";
 
         // Intentar leer profile real
         const { data: profile, error: profileError } = await supabase
           .from("profiles")
-          .select(
-            "id, full_name, role, app_role, manager_id, organization_id, created_at"
-          )
+          .select("id, full_name, role, app_role, organization_id, created_at")
           .eq("id", user.id)
           .maybeSingle<DBProfile>();
 
@@ -167,7 +162,6 @@ function App() {
           if (profile.full_name) fullName = profile.full_name;
           if (profile.role) role = profile.role;
           if (profile.organization_id) orgId = profile.organization_id;
-          if (profile.manager_id) managerId = profile.manager_id;
           if (profile.app_role) {
             appRole = profile.app_role as AppRole;
           }
@@ -193,7 +187,6 @@ function App() {
           role, // Job title
           avatar: initials,
           color: "bg-indigo-600",
-          managerId,
           appRole,
         });
         setOrganizationId(orgId);
