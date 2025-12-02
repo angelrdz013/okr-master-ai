@@ -1,3 +1,5 @@
+// types.ts
+
 export interface KeyResult {
   id: string;
   title: string;
@@ -14,16 +16,22 @@ export interface Objective {
   keyResults: KeyResult[];
   createdAt: number;
   lastCoaching?: string;
-  category: 'Business';
+  category: "Business";
 }
+
+// 👇 NUEVO: tipo para el rol dentro de la app
+export type AppRole = "owner" | "manager" | "employee";
 
 export interface User {
   id: string;
   name: string;
-  role: string;
-  avatar: string; // Initials
-  color: string; // Tailwind color class
+  role: string;      // Job title (lo que ya usas: "HR Director", "CEO", etc.)
+  avatar: string;    // Initials
+  color: string;     // Tailwind color class
   managerId: string | null; // ID of the user's manager
+
+  // 👇 NUEVO: rol en la herramienta (permisos/pestañas)
+  appRole: AppRole;
 }
 
 export interface AISuggestion {
@@ -36,7 +44,7 @@ export interface AISuggestion {
 }
 
 export interface AICoaching {
-  status: 'On Track' | 'At Risk' | 'Off Track';
+  status: "On Track" | "At Risk" | "Off Track";
   summary: string;
   tips: string[];
 }
