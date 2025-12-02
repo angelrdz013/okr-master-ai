@@ -99,15 +99,52 @@ function App() {
       showToast("Error inesperado al cerrar sesión", "error");
     }
   };
+const handleSaveOkr = (
+  partialOkr: Omit<Objective, "id" | "createdAt" | "lastCoaching">
+) => {
+  if (editingOkrId) {
+    // Update existing
+    const existing = allObjectives.find(o => o.id === editingOkrId);
+    if (!existing) return;
 
-  const handleSaveOkr = (
-    partialOkr: Omit<Objective, "id" | "createdAt" | "lastCoaching">
-  ) => {
-    if (editingOkrId) {
-      // Update existing
-      const existing = allObjectives.find((o) => o.id === editingOkrId);
-      if (!existing) return;
+    const updatedOkr: Objective = {
+      // siempre respetamos los campos "identidad" del OKR
+      ...existing,
+      ...partialOkr,
+      id: existing.id,
+      ownerId: existing.ownerId,
+      createdAt: existing.createdAt,
+      lastCoaching: existing.lastCoaching,
+      keyResults: partialOkr.keyResults.map(kr => ({
+        ...kr,
+        id: kr.id || generateId(),
+      })),
+    };
 
+    setAllObjectives(prev =>
+      prev.map(o => (o.id === editingOkrId ? updatedOkr : o))
+    );
+    showToast("OKR actualizado correctamente");
+    setEditingOkrId(null);
+  } else {
+    // Create new
+    const newOkr: Objective = {
+      ...partialOkr,
+      id: generateId(),
+      ownerId: currentUser.id,
+      createdAt: Date.now(),
+      keyResults: partialOkr.keyResults.map(kr => ({
+        ...kr,
+        id: generateId(),
+      })),
+    };
+    setAllObjectives(prev => [newOkr, ...prev]);
+    showToast("OKR creado exitosamente");
+  }
+
+  setDraftOkr(undefined);
+  setView("dashboard");
+};
       const updatedOkr: Objective = {
         ...existing,
         ...partialOkr,
