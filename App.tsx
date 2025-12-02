@@ -37,6 +37,13 @@ const DEFAULT_USER: User = {
   avatar: "MU",
 };
 
+// Tipo de OKR que se edita/crea en el wizard
+// NOTA: aquí excluimos ownerId para no pisarlo al actualizar
+type EditableObjective = Omit<
+  Objective,
+  "id" | "createdAt" | "lastCoaching" | "ownerId"
+>;
+
 function App() {
   const [view, setView] = useState<"dashboard" | "create" | "detail">(
     "dashboard"
@@ -49,9 +56,10 @@ function App() {
 
   // Data State - sólo localStorage; si no hay nada, arranca vacío
   const [allObjectives, setAllObjectives] = useState<Objective[]>(() => {
-    const saved = typeof window !== "undefined"
-      ? window.localStorage.getItem("okr-master-db")
-      : null;
+    const saved =
+      typeof window !== "undefined"
+        ? window.localStorage.getItem("okr-master-db")
+        : null;
     return saved ? JSON.parse(saved) : [];
   });
 
@@ -100,9 +108,7 @@ function App() {
     }
   };
 
-  const handleSaveOkr = (
-    partialOkr: Omit<Objective, "id" | "createdAt" | "lastCoaching">
-  ) => {
+  const handleSaveOkr = (partialOkr: EditableObjective) => {
     if (editingOkrId) {
       // Update existing
       const existing = allObjectives.find((o) => o.id === editingOkrId);
@@ -111,11 +117,14 @@ function App() {
       const updatedOkr: Objective = {
         ...existing,
         ...partialOkr,
+        // MUY IMPORTANTE: NO perder el ownerId al actualizar
+        ownerId: existing.ownerId ?? currentUser.id,
         keyResults: partialOkr.keyResults.map((kr) => ({
           ...kr,
           id: kr.id || generateId(),
         })),
       };
+
       setAllObjectives((prev) =>
         prev.map((o) => (o.id === editingOkrId ? updatedOkr : o))
       );
