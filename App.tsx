@@ -16,7 +16,7 @@ import {
   Layout,
 } from "lucide-react";
 
-// Utility for ID generation
+// Utility for ID generation (solo para toasts, etc.)
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
 interface Toast {
@@ -27,7 +27,7 @@ interface Toast {
 
 type TabView = "my-okrs";
 
-// Usuario único por defecto
+// Usuario por defecto mientras cargamos de Supabase
 const DEFAULT_USER: User = {
   id: "current-user",
   name: "Mi usuario",
@@ -37,12 +37,65 @@ const DEFAULT_USER: User = {
   avatar: "MU",
 };
 
+// Tipos para filas de BD
+type DBProfile = {
+  id: string;
+  full_name: string | null;
+  role: string | null;
+  organization_id: string | null;
+  created_at: string;
+};
+
+type DBObjectiveRow = {
+  id: string;
+  owner_id: string;
+  organization_id: string | null;
+  title: string;
+  category: string;
+  created_at: string;
+};
+
+type DBKeyResultRow = {
+  id: string;
+  objective_id: string;
+  title: string;
+  current_value: number | null;
+  target_value: number | null;
+  unit: string | null;
+  created_at: string;
+};
+
 // Tipo de OKR que se edita/crea en el wizard
 // NOTA: aquí excluimos ownerId para no pisarlo al actualizar
 type EditableObjective = Omit<
   Objective,
-  "id" | "createdAt" | "lastCoaching" | "ownerId"
+  "id" | "createdAt" | "lastCoaching" | "ownerId" | "organizationId"
 >;
+
+// Helper: mapear filas de BD a Objective del front
+const mapDbToObjective = (
+  obj: DBObjectiveRow,
+  keyResults: DBKeyResultRow[]
+): Objective => {
+  return {
+    id: obj.id,
+    ownerId: obj.owner_id,
+    // si en tu tipo Objective tienes organizationId, lo usamos; si no, TS lo ignorará
+    // @ts-ignore
+    organizationId: obj.organization_id ?? undefined,
+    title: obj.title,
+    category: obj.category as Objective["category"],
+    createdAt: new Date(obj.created_at).getTime(),
+    keyResults: keyResults.map((kr) => ({
+      id: kr.id,
+      title: kr.title,
+      currentValue: Number(kr.current_value ?? 0),
+      targetValue: Number(kr.target_value ?? 0),
+      unit: kr.unit || "",
+    })),
+    lastCoaching: undefined,
+  };
+};
 
 function App() {
   const [view, setView] = useState<"dashboard" | "create" | "detail">(
@@ -51,24 +104,160 @@ function App() {
   const [activeTab, setActiveTab] = useState<TabView>("my-okrs");
   const [showReport, setShowReport] = useState(false);
 
-  // User State: un solo usuario (por ahora, mientras conectamos Supabase a OKRs)
-  const [currentUser] = useState<User>(DEFAULT_USER);
+  // User State
+  const [currentUser, setCurrentUser] = useState<User>(DEFAULT_USER);
+  const [organizationId, setOrganizationId] = useState<string | null>(null);
 
-  // Data State - sólo localStorage; si no hay nada, arranca vacío
-  const [allObjectives, setAllObjectives] = useState<Objective[]>(() => {
-    const saved =
-      typeof window !== "undefined"
-        ? window.localStorage.getItem("okr-master-db")
-        : null;
-    return saved ? JSON.parse(saved) : [];
-  });
-
+  // Data State (ya no usamos localStorage como fuente principal)
+  const [allObjectives, setAllObjectives] = useState<Objective[]>([]);
   const [selectedOkrId, setSelectedOkrId] = useState<string | null>(null);
   const [editingOkrId, setEditingOkrId] = useState<string | null>(null);
   const [draftOkr, setDraftOkr] = useState<Objective | undefined>(undefined);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [isLoadingOkrs, setIsLoadingOkrs] = useState(false);
 
-  // Persistencia en localStorage
+  // ---- CARGAR USUARIO + PROFILE DESDE SUPABASE ----
+  useEffect(() => {
+    const loadCurrentUser = async () => {
+      try {
+        const {
+          data: { user },
+          error,
+        } = await supabase.auth.getUser();
+
+        if (error) {
+          console.error("Error obteniendo usuario de Supabase:", error.message);
+          return;
+        }
+        if (!user) {
+          console.warn("No hay usuario autenticado, usando DEFAULT_USER");
+          return;
+        }
+
+        const metadata = (user.user_metadata || {}) as any;
+
+        let fullName =
+          (metadata.full_name as string) ||
+          (metadata.name as string) ||
+          user.email?.split("@")[0] ||
+          "Mi usuario";
+
+        let role = (metadata.role as string) || "Owner";
+        let orgId: string | null = null;
+
+        // Intentar leer profile real
+        const { data: profile, error: profileError } = await supabase
+          .from("profiles")
+          .select("id, full_name, role, organization_id, created_at")
+          .eq("id", user.id)
+          .maybeSingle<DBProfile>();
+
+        if (profileError) {
+          // 406/No rows está bien, usamos metadata
+          console.warn("Error cargando profile:", profileError.message);
+        } else if (profile) {
+          if (profile.full_name) fullName = profile.full_name;
+          if (profile.role) role = profile.role;
+          if (profile.organization_id) orgId = profile.organization_id;
+        }
+
+        const initials = fullName
+          .trim()
+          .split(" ")
+          .filter((p) => p.length > 0)
+          .map((p) => p[0])
+          .join("")
+          .slice(0, 2)
+          .toUpperCase();
+
+        setCurrentUser((prev) => ({
+          ...prev,
+          id: user.id,
+          name: fullName,
+          role,
+          avatar: initials,
+        }));
+        setOrganizationId(orgId);
+      } catch (err) {
+        console.error("Error inesperado cargando usuario:", err);
+      }
+    };
+
+    loadCurrentUser();
+  }, []);
+
+  // ---- CARGAR OKRs DESDE SUPABASE ----
+  useEffect(() => {
+    const loadOkrs = async () => {
+      if (!currentUser.id || currentUser.id === DEFAULT_USER.id) return;
+
+      setIsLoadingOkrs(true);
+      try {
+        let query = supabase
+          .from("objectives")
+          .select(
+            "id, owner_id, organization_id, title, category, created_at"
+          )
+          .eq("owner_id", currentUser.id) as any;
+
+        if (organizationId) {
+          query = query.eq("organization_id", organizationId);
+        }
+
+        const { data: dbObjectives, error: objError } =
+          await query.order("created_at", { ascending: false });
+
+        if (objError) {
+          console.error("Error cargando objectives:", objError.message);
+          setAllObjectives([]);
+          return;
+        }
+
+        const objectives = (dbObjectives || []) as DBObjectiveRow[];
+
+        if (objectives.length === 0) {
+          setAllObjectives([]);
+          return;
+        }
+
+        const objectiveIds = objectives.map((o) => o.id);
+
+        const { data: dbKeyResults, error: krError } = await supabase
+          .from("key_results")
+          .select(
+            "id, objective_id, title, current_value, target_value, unit, created_at"
+          )
+          .in("objective_id", objectiveIds);
+
+        if (krError) {
+          console.error("Error cargando key_results:", krError.message);
+        }
+
+        const keyResults = (dbKeyResults || []) as DBKeyResultRow[];
+
+        const byObjective = new Map<string, DBKeyResultRow[]>();
+        keyResults.forEach((kr) => {
+          const arr = byObjective.get(kr.objective_id) || [];
+          arr.push(kr);
+          byObjective.set(kr.objective_id, arr);
+        });
+
+        const mapped: Objective[] = objectives.map((o) =>
+          mapDbToObjective(o, byObjective.get(o.id) || [])
+        );
+
+        setAllObjectives(mapped);
+      } catch (err) {
+        console.error("Error inesperado cargando OKRs:", err);
+      } finally {
+        setIsLoadingOkrs(false);
+      }
+    };
+
+    loadOkrs();
+  }, [currentUser.id, organizationId]);
+
+  // Persistencia en localStorage solo como backup/caché (opcional)
   useEffect(() => {
     if (typeof window !== "undefined") {
       window.localStorage.setItem("okr-master-db", JSON.stringify(allObjectives));
@@ -101,66 +290,238 @@ function App() {
         console.error("Error al cerrar sesión:", error.message);
         showToast("Hubo un problema al cerrar sesión", "error");
       }
-      // AuthGate detecta la sesión null y nos manda al Login
     } catch (err: any) {
       console.error("Error inesperado al cerrar sesión:", err);
       showToast("Error inesperado al cerrar sesión", "error");
     }
   };
 
-  const handleSaveOkr = (partialOkr: EditableObjective) => {
-    if (editingOkrId) {
-      // Update existing
-      const existing = allObjectives.find((o) => o.id === editingOkrId);
-      if (!existing) return;
+  // ---- CREAR / ACTUALIZAR OKR (OBJECTIVES + KEY_RESULTS) ----
+  const handleSaveOkr = async (partialOkr: EditableObjective) => {
+    try {
+      if (editingOkrId) {
+        // UPDATE EXISTING OBJECTIVE
+        const { error: updError } = await supabase
+          .from("objectives")
+          .update({
+            title: partialOkr.title,
+            category: partialOkr.category,
+          })
+          .eq("id", editingOkrId);
 
-      const updatedOkr: Objective = {
-        ...existing,
-        ...partialOkr,
-        // MUY IMPORTANTE: NO perder el ownerId al actualizar
-        ownerId: existing.ownerId ?? currentUser.id,
-        keyResults: partialOkr.keyResults.map((kr) => ({
-          ...kr,
-          id: kr.id || generateId(),
-        })),
-      };
+        if (updError) {
+          console.error("Error actualizando objective:", updError.message);
+          showToast("No se pudo actualizar el OKR", "error");
+          return;
+        }
 
-      setAllObjectives((prev) =>
-        prev.map((o) => (o.id === editingOkrId ? updatedOkr : o))
-      );
-      showToast("OKR actualizado correctamente");
-      setEditingOkrId(null);
-    } else {
-      // Create new
-      const newOkr: Objective = {
-        ...partialOkr,
-        id: generateId(),
-        ownerId: currentUser.id,
-        createdAt: Date.now(),
-        keyResults: partialOkr.keyResults.map((kr) => ({
-          ...kr,
-          id: generateId(),
-        })),
-      };
-      setAllObjectives((prev) => [newOkr, ...prev]);
-      showToast("OKR creado exitosamente");
+        // Borramos todos los KRs y los reinsertamos
+        const { error: delError } = await supabase
+          .from("key_results")
+          .delete()
+          .eq("objective_id", editingOkrId);
+
+        if (delError) {
+          console.error("Error borrando key_results:", delError.message);
+        }
+
+        const krPayload = partialOkr.keyResults.map((kr) => ({
+          objective_id: editingOkrId,
+          title: kr.title,
+          current_value: kr.currentValue,
+          target_value: kr.targetValue,
+          unit: kr.unit,
+        }));
+
+        let insertedKrs: DBKeyResultRow[] = [];
+        if (krPayload.length > 0) {
+          const { data: krData, error: insKrError } = await supabase
+            .from("key_results")
+            .insert(krPayload)
+            .select(
+              "id, objective_id, title, current_value, target_value, unit, created_at"
+            );
+
+          if (insKrError) {
+            console.error("Error insertando key_results:", insKrError.message);
+            showToast("OKR actualizado, pero hubo un problema con los KRs", "error");
+          } else {
+            insertedKrs = (krData || []) as DBKeyResultRow[];
+          }
+        }
+
+        // Volvemos a leer el objective actualizado
+        const { data: objData, error: objError } = await supabase
+          .from("objectives")
+          .select(
+            "id, owner_id, organization_id, title, category, created_at"
+          )
+          .eq("id", editingOkrId)
+          .single<DBObjectiveRow>();
+
+        if (objError || !objData) {
+          console.error("Error recargando objective:", objError?.message);
+          showToast("OKR actualizado, pero no se pudo refrescar la vista", "error");
+        } else {
+          const updated = mapDbToObjective(objData, insertedKrs);
+          setAllObjectives((prev) =>
+            prev.map((o) => (o.id === editingOkrId ? updated : o))
+          );
+          showToast("OKR actualizado correctamente");
+        }
+
+        setEditingOkrId(null);
+      } else {
+        // CREATE NEW OBJECTIVE
+        const { data: objData, error: objError } = await supabase
+          .from("objectives")
+          .insert({
+            owner_id: currentUser.id,
+            organization_id: organizationId,
+            title: partialOkr.title,
+            category: partialOkr.category,
+          })
+          .select(
+            "id, owner_id, organization_id, title, category, created_at"
+          )
+          .single<DBObjectiveRow>();
+
+        if (objError || !objData) {
+          console.error("Error creando objective:", objError?.message);
+          showToast("No se pudo crear el OKR", "error");
+          return;
+        }
+
+        const krPayload = partialOkr.keyResults.map((kr) => ({
+          objective_id: objData.id,
+          title: kr.title,
+          current_value: kr.currentValue,
+          target_value: kr.targetValue,
+          unit: kr.unit,
+        }));
+
+        let insertedKrs: DBKeyResultRow[] = [];
+        if (krPayload.length > 0) {
+          const { data: krData, error: krError } = await supabase
+            .from("key_results")
+            .insert(krPayload)
+            .select(
+              "id, objective_id, title, current_value, target_value, unit, created_at"
+            );
+
+          if (krError) {
+            console.error("Error creando key_results:", krError.message);
+            showToast(
+              "Objetivo creado, pero hubo un problema guardando los KRs",
+              "error"
+            );
+          } else {
+            insertedKrs = (krData || []) as DBKeyResultRow[];
+          }
+        }
+
+        const newOkr = mapDbToObjective(objData, insertedKrs);
+        setAllObjectives((prev) => [newOkr, ...prev]);
+        showToast("OKR creado exitosamente");
+      }
+    } catch (err) {
+      console.error("Error inesperado al guardar OKR:", err);
+      showToast("Error inesperado al guardar", "error");
     }
+
     setDraftOkr(undefined);
     setView("dashboard");
   };
 
-  const handleUpdateOkr = (updatedOkr: Objective) => {
+  // ---- ACTUALIZAR PROGRESO / DETALLE DESDE OKR DETAIL ----
+  const handleUpdateOkr = async (updatedOkr: Objective) => {
+    // Optimista en UI
     setAllObjectives((prev) =>
       prev.map((o) => (o.id === updatedOkr.id ? updatedOkr : o))
     );
+
+    try {
+      const { error: updError } = await supabase
+        .from("objectives")
+        .update({
+          title: updatedOkr.title,
+          category: updatedOkr.category,
+        })
+        .eq("id", updatedOkr.id);
+
+      if (updError) {
+        console.error("Error actualizando objective:", updError.message);
+      }
+
+      // Simplificación: borramos KRs y los reinsertamos
+      const { error: delError } = await supabase
+        .from("key_results")
+        .delete()
+        .eq("objective_id", updatedOkr.id);
+
+      if (delError) {
+        console.error("Error borrando key_results:", delError.message);
+      }
+
+      const krPayload = updatedOkr.keyResults.map((kr) => ({
+        objective_id: updatedOkr.id,
+        title: kr.title,
+        current_value: kr.currentValue,
+        target_value: kr.targetValue,
+        unit: kr.unit,
+      }));
+
+      if (krPayload.length > 0) {
+        const { error: insError } = await supabase
+          .from("key_results")
+          .insert(krPayload);
+
+        if (insError) {
+          console.error("Error reinsertando key_results:", insError.message);
+          showToast("Cambios guardados parcialmente (KRs con error)", "error");
+          return;
+        }
+      }
+
+      showToast("Cambios guardados");
+    } catch (err) {
+      console.error("Error inesperado al actualizar OKR:", err);
+      showToast("Error inesperado al actualizar", "error");
+    }
   };
 
-  const handleDeleteOkr = (id: string) => {
-    if (window.confirm("¿Estás seguro de eliminar este OKR?")) {
+  const handleDeleteOkr = async (id: string) => {
+    if (!window.confirm("¿Estás seguro de eliminar este OKR?")) return;
+
+    try {
+      // Borrar KRs primero
+      const { error: krError } = await supabase
+        .from("key_results")
+        .delete()
+        .eq("objective_id", id);
+
+      if (krError) {
+        console.error("Error borrando key_results:", krError.message);
+      }
+
+      const { error: objError } = await supabase
+        .from("objectives")
+        .delete()
+        .eq("id", id);
+
+      if (objError) {
+        console.error("Error borrando objective:", objError.message);
+        showToast("No se pudo eliminar el OKR", "error");
+        return;
+      }
+
       setAllObjectives((prev) => prev.filter((o) => o.id !== id));
       setView("dashboard");
       setSelectedOkrId(null);
       showToast("OKR eliminado");
+    } catch (err) {
+      console.error("Error inesperado al eliminar OKR:", err);
+      showToast("Error inesperado al eliminar", "error");
     }
   };
 
@@ -421,7 +782,11 @@ function App() {
                   </div>
                 </div>
 
-                {myOkrs.length === 0 ? (
+                {isLoadingOkrs ? (
+                  <div className="text-slate-500 text-sm">
+                    Cargando tus OKRs...
+                  </div>
+                ) : myOkrs.length === 0 ? (
                   <div className="text-center py-20 bg-white rounded-2xl border border-dashed border-slate-300 shadow-sm">
                     <div className="bg-indigo-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
                       <Target className="w-8 h-8 text-indigo-500" />
