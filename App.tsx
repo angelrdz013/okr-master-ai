@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "./supabaseClient";
 import { LogOut } from "lucide-react";
-import { Objective, User, AppRole } from "./types";
+import { Objective, User } from "./types";
 import Wizard from "./components/Wizard";
 import OkrDetail from "./components/OkrDetail";
 import MonthlyReportModal from "./components/MonthlyReport";
@@ -16,7 +16,7 @@ import {
   Layout,
 } from "lucide-react";
 
-// Utility for ID generation (solo para toasts, etc.)
+// Utility for ID generation (toasts, etc.)
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
 interface Toast {
@@ -25,918 +25,677 @@ interface Toast {
   type: "success" | "error";
 }
 
-// 👉 Ahora tenemos más tabs
-type TabView = "my-okrs" | "team" | "alignment" | "reports";
+// Vistas posibles
+type TabView = "my-okrs" | "team-okrs" | "owner-okrs" | "all-okrs";
 
-// Usuario por defecto mientras cargamos de Supabase
-const DEFAULT_USER: User = {
-  id: "current-user",
-  name: "Mi usuario",
-  role: "Owner", // Job title de relleno
-  color: "bg-indigo-600",
-  avatar: "MU",
-  appRole: "owner", // 👈 rol en la app
+// Helper para obtener ownerId de un Objective, sin depender del tipo exacto
+const getOwnerIdFromObjective = (obj: any): string => {
+  return obj.owner_id ?? obj.ownerId ?? obj.owner ?? "";
 };
 
-// Tipos para filas de BD
-type DBProfile = {
-  id: string;
-  full_name: string | null;
-  role: string | null;          // job title
-  app_role: string | null;      // "owner" | "manager" | "employee"
-  organization_id: string | null;
-  created_at: string;
-};
-
-type DBObjectiveRow = {
-  id: string;
-  owner_id: string;
-  organization_id: string | null;
-  title: string;
-  category: string;
-  created_at: string;
-};
-
-type DBKeyResultRow = {
-  id: string;
-  objective_id: string;
-  title: string;
-  current_value: number | null;
-  target_value: number | null;
-  unit: string | null;
-  created_at: string;
-};
-
-// Tipo de OKR que se edita/crea en el wizard
-// NOTA: aquí excluimos ownerId para no pisarlo al actualizar
-type EditableObjective = Omit<
-  Objective,
-  "id" | "createdAt" | "lastCoaching" | "ownerId" | "organizationId"
->;
-
-// Helper: mapear filas de BD a Objective del front
-const mapDbToObjective = (
-  obj: DBObjectiveRow,
-  keyResults: DBKeyResultRow[]
-): Objective => {
-  return {
-    id: obj.id,
-    ownerId: obj.owner_id,
-    // si en tu tipo Objective tienes organizationId, lo usamos; si no, TS lo ignorará
-    // @ts-ignore
-    organizationId: obj.organization_id ?? undefined,
-    title: obj.title,
-    category: obj.category as Objective["category"],
-    createdAt: new Date(obj.created_at).getTime(),
-    keyResults: keyResults.map((kr) => ({
-      id: kr.id,
-      title: kr.title,
-      currentValue: Number(kr.current_value ?? 0),
-      targetValue: Number(kr.target_value ?? 0),
-      unit: kr.unit || "",
-    })),
-    lastCoaching: undefined,
-  };
-};
-
+// ------------------------------------------------------
+// App principal
+// ------------------------------------------------------
 function App() {
-  const [view, setView] = useState<"dashboard" | "create" | "detail">(
-    "dashboard"
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [profiles, setProfiles] = useState<User[]>([]);
+  const [objectives, setObjectives] = useState<Objective[]>([]);
+  const [selectedObjective, setSelectedObjective] = useState<Objective | null>(
+    null
   );
+  const [isWizardOpen, setIsWizardOpen] = useState(false);
+  const [isMonthlyReportOpen, setIsMonthlyReportOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<TabView>("my-okrs");
-  const [showReport, setShowReport] = useState(false);
-
-  // User State
-  const [currentUser, setCurrentUser] = useState<User>(DEFAULT_USER);
-  const [organizationId, setOrganizationId] = useState<string | null>(null);
-
-  // Data State (ya no usamos localStorage como fuente principal)
-  const [allObjectives, setAllObjectives] = useState<Objective[]>([]);
-  const [selectedOkrId, setSelectedOkrId] = useState<string | null>(null);
-  const [editingOkrId, setEditingOkrId] = useState<string | null>(null);
-  const [draftOkr, setDraftOkr] = useState<Objective | undefined>(undefined);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [isLoadingOkrs, setIsLoadingOkrs] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  // ---- CARGAR USUARIO + PROFILE DESDE SUPABASE ----
-  useEffect(() => {
-    const loadCurrentUser = async () => {
-      try {
-        const {
-          data: { user },
-          error,
-        } = await supabase.auth.getUser();
-
-        if (error) {
-          console.error("Error obteniendo usuario de Supabase:", error.message);
-          return;
-        }
-        if (!user) {
-          console.warn("No hay usuario autenticado, usando DEFAULT_USER");
-          return;
-        }
-
-        const metadata = (user.user_metadata || {}) as any;
-
-        let fullName =
-          (metadata.full_name as string) ||
-          (metadata.name as string) ||
-          user.email?.split("@")[0] ||
-          "Mi usuario";
-
-        // role = Job Title
-        let role = (metadata.role as string) || "Owner";
-        let orgId: string | null = null;
-        let appRole: AppRole = "employee";
-
-        // Intentar leer profile real
-        const { data: profile, error: profileError } = await supabase
-          .from("profiles")
-          .select("id, full_name, role, app_role, organization_id, created_at")
-          .eq("id", user.id)
-          .maybeSingle<DBProfile>();
-
-        if (profileError) {
-          console.warn("Error cargando profile:", profileError.message);
-        } else if (profile) {
-          if (profile.full_name) fullName = profile.full_name;
-          if (profile.role) role = profile.role;
-          if (profile.organization_id) orgId = profile.organization_id;
-          if (profile.app_role) {
-            appRole = profile.app_role as AppRole;
-          }
-        }
-
-        // Si no viene de profile, intentamos metadata
-        if (!profile?.app_role && metadata.app_role) {
-          appRole = metadata.app_role as AppRole;
-        }
-
-        const initials = fullName
-          .trim()
-          .split(" ")
-          .filter((p) => p.length > 0)
-          .map((p) => p[0])
-          .join("")
-          .slice(0, 2)
-          .toUpperCase();
-
-        setCurrentUser({
-          id: user.id,
-          name: fullName,
-          role, // Job title
-          avatar: initials,
-          color: "bg-indigo-600",
-          appRole,
-        });
-        setOrganizationId(orgId);
-      } catch (err) {
-        console.error("Error inesperado cargando usuario:", err);
-      }
-    };
-
-    loadCurrentUser();
-  }, []);
-
-  // ---- CARGAR OKRs DESDE SUPABASE ----
-  useEffect(() => {
-    const loadOkrs = async () => {
-      if (!currentUser.id || currentUser.id === DEFAULT_USER.id) return;
-
-      setIsLoadingOkrs(true);
-      try {
-        let query = supabase
-          .from("objectives")
-          .select(
-            "id, owner_id, organization_id, title, category, created_at"
-          )
-          .eq("owner_id", currentUser.id) as any;
-
-        if (organizationId) {
-          query = query.eq("organization_id", organizationId);
-        }
-
-        const { data: dbObjectives, error: objError } =
-          await query.order("created_at", { ascending: false });
-
-        if (objError) {
-          console.error("Error cargando objectives:", objError.message);
-          setAllObjectives([]);
-          return;
-        }
-
-        const objectives = (dbObjectives || []) as DBObjectiveRow[];
-
-        if (objectives.length === 0) {
-          setAllObjectives([]);
-          return;
-        }
-
-        const objectiveIds = objectives.map((o) => o.id);
-
-        const { data: dbKeyResults, error: krError } = await supabase
-          .from("key_results")
-          .select(
-            "id, objective_id, title, current_value, target_value, unit, created_at"
-          )
-          .in("objective_id", objectiveIds);
-
-        if (krError) {
-          console.error("Error cargando key_results:", krError.message);
-        }
-
-        const keyResults = (dbKeyResults || []) as DBKeyResultRow[];
-
-        const byObjective = new Map<string, DBKeyResultRow[]>();
-        keyResults.forEach((kr) => {
-          const arr = byObjective.get(kr.objective_id) || [];
-          arr.push(kr);
-          byObjective.set(kr.objective_id, arr);
-        });
-
-        const mapped: Objective[] = objectives.map((o) =>
-          mapDbToObjective(o, byObjective.get(o.id) || [])
-        );
-
-        setAllObjectives(mapped);
-      } catch (err) {
-        console.error("Error inesperado cargando OKRs:", err);
-      } finally {
-        setIsLoadingOkrs(false);
-      }
-    };
-
-    loadOkrs();
-  }, [currentUser.id, organizationId]);
-
-  // Persistencia en localStorage solo como backup/caché (opcional)
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem("okr-master-db", JSON.stringify(allObjectives));
-    }
-  }, [allObjectives]);
-
-  // Mis OKRs (solo del usuario actual)
-  const myOkrs = useMemo(
-    () => allObjectives.filter((o) => o.ownerId === currentUser.id),
-    [allObjectives, currentUser]
-  );
-
-  // 👉 Tabs disponibles
-  const availableTabs: { id: TabView; label: string }[] = [
-    { id: "my-okrs", label: "Mis OKRs" },
-    { id: "team", label: "Mi equipo" },
-    { id: "alignment", label: "Alineación" },
-    { id: "reports", label: "Reportes" },
-  ];
-
-  // 👉 Tabs visibles según rol en la app
-  const tabsForUser = useMemo(() => {
-    const tabs: TabView[] = ["my-okrs"];
-
-    if (currentUser.appRole === "manager" || currentUser.appRole === "owner") {
-      tabs.push("team");
-    }
-
-    if (currentUser.appRole === "owner") {
-      tabs.push("alignment", "reports");
-    }
-
-    return tabs;
-  }, [currentUser.appRole]);
-
-  // Toast helper
-  const showToast = (
-    message: string,
-    type: "success" | "error" = "success"
-  ) => {
+  // -------------------------
+  // Manejo de Toasts
+  // -------------------------
+  const addToast = (message: string, type: "success" | "error" = "success") => {
     const id = generateId();
     setToasts((prev) => [...prev, { id, message, type }]);
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 3000);
+    }, 4000);
   };
 
-  // Logout
-  const handleLogout = async () => {
-    try {
-      const { error } = await supabase.auth.signOut();
-      if (error) {
-        console.error("Error al cerrar sesión:", error.message);
-        showToast("Hubo un problema al cerrar sesión", "error");
-      }
-    } catch (err: any) {
-      console.error("Error inesperado al cerrar sesión:", err);
-      showToast("Error inesperado al cerrar sesión", "error");
-    }
-  };
-
-  // ---- CREAR / ACTUALIZAR OKR (OBJECTIVES + KEY_RESULTS) ----
-  const handleSaveOkr = async (partialOkr: EditableObjective) => {
-    try {
-      if (editingOkrId) {
-        // UPDATE EXISTING OBJECTIVE
-        const { error: updError } = await supabase
-          .from("objectives")
-          .update({
-            title: partialOkr.title,
-            category: partialOkr.category,
-          })
-          .eq("id", editingOkrId);
-
-        if (updError) {
-          console.error("Error actualizando objective:", updError.message);
-          showToast("No se pudo actualizar el OKR", "error");
+  // -------------------------
+  // Cargar perfiles desde Supabase
+  // -------------------------
+  useEffect(() => {
+    const loadProfiles = async () => {
+      try {
+        const { data, error } = await supabase.from("profiles").select("*");
+        if (error) {
+          console.error("Error loading profiles:", error);
+          addToast("Error cargando perfiles", "error");
           return;
         }
+        if (!data) return;
 
-        // Borramos todos los KRs y los reinsertamos
-        const { error: delError } = await supabase
-          .from("key_results")
-          .delete()
-          .eq("objective_id", editingOkrId);
-
-        if (delError) {
-          console.error("Error borrando key_results:", delError.message);
-        }
-
-        const krPayload = partialOkr.keyResults.map((kr) => ({
-          objective_id: editingOkrId,
-          title: kr.title,
-          current_value: kr.currentValue,
-          target_value: kr.targetValue,
-          unit: kr.unit,
+        const mappedProfiles: User[] = data.map((row: any) => ({
+          id: row.id,
+          name: row.name || "Sin nombre",
+          role: row.role || "Employee",
+          managerId: row.managerId ?? row.manager_id ?? null,
+          color: row.color || "bg-slate-600",
+          avatar:
+            row.avatar ||
+            (row.name ? row.name[0].toUpperCase() : "U"),
         }));
 
-        let insertedKrs: DBKeyResultRow[] = [];
-        if (krPayload.length > 0) {
-          const { data: krData, error: insKrError } = await supabase
-            .from("key_results")
-            .insert(krPayload)
-            .select(
-              "id, objective_id, title, current_value, target_value, unit, created_at"
-            );
+        setProfiles(mappedProfiles);
 
-          if (insKrError) {
-            console.error("Error insertando key_results:", insKrError.message);
-            showToast("OKR actualizado, pero hubo un problema con los KRs", "error");
+        // Definir usuario actual por defecto:
+        // 1) Owner si existe, si no, el primero
+        const ownerProfile =
+          mappedProfiles.find((p) => p.role === "Owner") ||
+          mappedProfiles[0];
+
+        if (ownerProfile) {
+          setCurrentUser(ownerProfile);
+          // Owner arranca viendo todo, otros empiezan con "my-okrs"
+          if (ownerProfile.role === "Owner") {
+            setActiveTab("all-okrs");
           } else {
-            insertedKrs = (krData || []) as DBKeyResultRow[];
+            setActiveTab("my-okrs");
           }
         }
+      } catch (err) {
+        console.error(err);
+        addToast("Error inesperado cargando perfiles", "error");
+      } finally {
+        setLoading(false);
+      }
+    };
 
-        // Volvemos a leer el objective actualizado
-        const { data: objData, error: objError } = await supabase
-          .from("objectives")
-          .select(
-            "id, owner_id, organization_id, title, category, created_at"
-          )
-          .eq("id", editingOkrId)
-          .single<DBObjectiveRow>();
+    loadProfiles();
+  }, []);
 
-        if (objError || !objData) {
-          console.error("Error recargando objective:", objError?.message);
-          showToast("OKR actualizado, pero no se pudo refrescar la vista", "error");
-        } else {
-          const updated = mapDbToObjective(objData, insertedKrs);
-          setAllObjectives((prev) =>
-            prev.map((o) => (o.id === editingOkrId ? updated : o))
-          );
-          showToast("OKR actualizado correctamente");
-        }
+  // -------------------------
+  // Cargar OKRs visibles según usuario y reporting
+  // -------------------------
+  useEffect(() => {
+    const loadObjectivesForUser = async () => {
+      if (!currentUser || profiles.length === 0) return;
 
-        setEditingOkrId(null);
+      try {
+        setLoading(true);
+        const visibleObjectives = await fetchVisibleObjectives(
+          currentUser,
+          profiles
+        );
+        setObjectives(visibleObjectives);
+      } catch (err) {
+        console.error(err);
+        addToast("Error cargando OKRs", "error");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadObjectivesForUser();
+  }, [currentUser, profiles]);
+
+  // -------------------------
+  // Tabs disponibles según rol
+  // -------------------------
+  const availableTabs = useMemo(() => {
+    if (!currentUser) {
+      return [{ id: "my-okrs" as TabView, label: "Mis OKRs" }];
+    }
+
+    if (currentUser.role === "Owner") {
+      return [
+        { id: "all-okrs" as TabView, label: "Todos los OKRs" },
+        { id: "my-okrs" as TabView, label: "Mis OKRs" },
+      ];
+    }
+
+    if (currentUser.role === "HR Director") {
+      return [
+        { id: "my-okrs" as TabView, label: "Mis OKRs" },
+        { id: "team-okrs" as TabView, label: "Equipo" },
+        { id: "owner-okrs" as TabView, label: "Owner" },
+      ];
+    }
+
+    // Reporte directo
+    return [
+      { id: "my-okrs" as TabView, label: "Mis OKRs" },
+      { id: "team-okrs" as TabView, label: "Mi jefe" },
+      { id: "owner-okrs" as TabView, label: "Owner" },
+    ];
+  }, [currentUser]);
+
+  // -------------------------
+  // Filtrar objetivos según Tab
+  // -------------------------
+  const visibleObjectivesByTab = useMemo(
+    () =>
+      filterObjectivesByTab(
+        objectives,
+        activeTab,
+        currentUser,
+        profiles
+      ),
+    [objectives, activeTab, currentUser, profiles]
+  );
+
+  // -------------------------
+  // Cambiar usuario actual (select arriba)
+  // -------------------------
+  const handleUserChange = (id: string) => {
+    const selected = profiles.find((p) => p.id === id);
+    if (selected) {
+      setCurrentUser(selected);
+      // Ajustar tab por rol
+      if (selected.role === "Owner") {
+        setActiveTab("all-okrs");
       } else {
-        // CREATE NEW OBJECTIVE
-        const { data: objData, error: objError } = await supabase
-          .from("objectives")
-          .insert({
-            owner_id: currentUser.id,
-            organization_id: organizationId,
-            title: partialOkr.title,
-            category: partialOkr.category,
-          })
-          .select(
-            "id, owner_id, organization_id, title, category, created_at"
-          )
-          .single<DBObjectiveRow>();
-
-        if (objError || !objData) {
-          console.error("Error creando objective:", objError?.message);
-          showToast("No se pudo crear el OKR", "error");
-          return;
-        }
-
-        const krPayload = partialOkr.keyResults.map((kr) => ({
-          objective_id: objData.id,
-          title: kr.title,
-          current_value: kr.currentValue,
-          target_value: kr.targetValue,
-          unit: kr.unit,
-        }));
-
-        let insertedKrs: DBKeyResultRow[] = [];
-        if (krPayload.length > 0) {
-          const { data: krData, error: krError } = await supabase
-            .from("key_results")
-            .insert(krPayload)
-            .select(
-              "id, objective_id, title, current_value, target_value, unit, created_at"
-            );
-
-          if (krError) {
-            console.error("Error creando key_results:", krError.message);
-            showToast(
-              "Objetivo creado, pero hubo un problema guardando los KRs",
-              "error"
-            );
-          } else {
-            insertedKrs = (krData || []) as DBKeyResultRow[];
-          }
-        }
-
-        const newOkr = mapDbToObjective(objData, insertedKrs);
-        setAllObjectives((prev) => [newOkr, ...prev]);
-        showToast("OKR creado exitosamente");
+        setActiveTab("my-okrs");
       }
-    } catch (err) {
-      console.error("Error inesperado al guardar OKR:", err);
-      showToast("Error inesperado al guardar", "error");
     }
-
-    setDraftOkr(undefined);
-    setView("dashboard");
   };
 
-  // ---- ACTUALIZAR PROGRESO / DETALLE DESDE OKR DETAIL ----
-  const handleUpdateOkr = async (updatedOkr: Objective) => {
-    // Optimista en UI
-    setAllObjectives((prev) =>
-      prev.map((o) => (o.id === updatedOkr.id ? updatedOkr : o))
+  // -------------------------
+  // Crear OKR (después de usar Wizard)
+  // -------------------------
+  const handleObjectiveCreated = (objective: Objective) => {
+    setObjectives((prev) => [...prev, objective]);
+    addToast("OKR creado correctamente", "success");
+  };
+
+  // -------------------------
+  // Actualizar OKR después de editar
+  // -------------------------
+  const handleObjectiveUpdated = (updated: Objective) => {
+    setObjectives((prev) =>
+      prev.map((o) => (o.id === updated.id ? updated : o))
     );
-
-    try {
-      const { error: updError } = await supabase
-        .from("objectives")
-        .update({
-          title: updatedOkr.title,
-          category: updatedOkr.category,
-        })
-        .eq("id", updatedOkr.id);
-
-      if (updError) {
-        console.error("Error actualizando objective:", updError.message);
-      }
-
-      // Simplificación: borramos KRs y los reinsertamos
-      const { error: delError } = await supabase
-        .from("key_results")
-        .delete()
-        .eq("objective_id", updatedOkr.id);
-
-      if (delError) {
-        console.error("Error borrando key_results:", delError.message);
-      }
-
-      const krPayload = updatedOkr.keyResults.map((kr) => ({
-        objective_id: updatedOkr.id,
-        title: kr.title,
-        current_value: kr.currentValue,
-        target_value: kr.targetValue,
-        unit: kr.unit,
-      }));
-
-      if (krPayload.length > 0) {
-        const { error: insError } = await supabase
-          .from("key_results")
-          .insert(krPayload);
-
-        if (insError) {
-          console.error("Error reinsertando key_results:", insError.message);
-          showToast("Cambios guardados parcialmente (KRs con error)", "error");
-          return;
-        }
-      }
-
-      showToast("Cambios guardados");
-    } catch (err) {
-      console.error("Error inesperado al actualizar OKR:", err);
-      showToast("Error inesperado al actualizar", "error");
-    }
+    addToast("OKR actualizado", "success");
   };
 
-  const handleDeleteOkr = async (id: string) => {
-    if (!window.confirm("¿Estás seguro de eliminar este OKR?")) return;
+  // -------------------------
+  // Lógica de adopción de KR
+  // (úsala donde pintas los KRs, enviando krId y owner del KR)
+  // -------------------------
+  const canCurrentUserAdoptFrom = (sourceOwnerId: string): boolean => {
+    if (!currentUser) return false;
+    return canUserAdoptFrom(currentUser, sourceOwnerId, profiles);
+  };
+
+  const adoptKr = async (krId: string, sourceOwnerId: string) => {
+    if (!currentUser) return;
+
+    if (!canCurrentUserAdoptFrom(sourceOwnerId)) {
+      addToast(
+        "No puedes adoptar este KR (solo los del jefe directo u Owner según tu rol)",
+        "error"
+      );
+      return;
+    }
 
     try {
-      // Borrar KRs primero
-      const { error: krError } = await supabase
+      // Traer KR original
+      const { data: krData, error: krError } = await supabase
         .from("key_results")
-        .delete()
-        .eq("objective_id", id);
+        .select("*")
+        .eq("id", krId)
+        .single();
 
-      if (krError) {
-        console.error("Error borrando key_results:", krError.message);
-      }
-
-      const { error: objError } = await supabase
-        .from("objectives")
-        .delete()
-        .eq("id", id);
-
-      if (objError) {
-        console.error("Error borrando objective:", objError.message);
-        showToast("No se pudo eliminar el OKR", "error");
+      if (krError || !krData) {
+        addToast("No se encontró el KR a adoptar", "error");
         return;
       }
 
-      setAllObjectives((prev) => prev.filter((o) => o.id !== id));
-      setView("dashboard");
-      setSelectedOkrId(null);
-      showToast("OKR eliminado");
+      // Crear KR nuevo como adoptado para el usuario actual
+      const { error: insertError } = await supabase
+        .from("key_results")
+        .insert({
+          // Campos básicos, ajusta según tu modelo real de KR
+          title: krData.title,
+          description: krData.description,
+          target: krData.target,
+          current: 0,
+          unit: krData.unit,
+          objective_id: krData.objective_id, // o crea un nuevo Objective si aplica
+          owner_id: currentUser.id,
+          parent_kr_id: krId,
+          adopted: true,
+        });
+
+      if (insertError) {
+        console.error(insertError);
+        addToast("Error al adoptar KR", "error");
+        return;
+      }
+
+      addToast("KR adoptado correctamente", "success");
     } catch (err) {
-      console.error("Error inesperado al eliminar OKR:", err);
-      showToast("Error inesperado al eliminar", "error");
+      console.error(err);
+      addToast("Error inesperado al adoptar KR", "error");
     }
   };
 
-  const handleEditOkr = (okr: Objective) => {
-    setEditingOkrId(okr.id);
-    setView("create");
-  };
-
-  const handleCancelWizard = () => {
-    setEditingOkrId(null);
-    setDraftOkr(undefined);
-    setView(editingOkrId ? "detail" : "dashboard");
-  };
-
-  const calculateProgress = (objective: Objective) => {
-    if (objective.keyResults.length === 0) return 0;
-    const total = objective.keyResults.reduce((acc, kr) => {
-      const p = Math.min(
-        100,
-        Math.max(0, (kr.currentValue / kr.targetValue) * 100)
-      );
-      return acc + p;
-    }, 0);
-    return Math.round(total / objective.keyResults.length);
-  };
-
-  const selectedOkr = allObjectives.find((o) => o.id === selectedOkrId);
-  const okrToEdit = editingOkrId
-    ? allObjectives.find((o) => o.id === editingOkrId)
-    : draftOkr;
-
-  // Render Helper para card de OKR
-  const renderOkrCard = (
-    okr: Objective,
-    onClick?: () => void,
-    readOnly: boolean = false
-  ) => {
-    const progress = calculateProgress(okr);
+  // ------------------------------------------------------
+  // Render
+  // ------------------------------------------------------
+  if (loading && !currentUser) {
     return (
-      <div
-        key={okr.id}
-        onClick={onClick}
-        className={`bg-white p-6 rounded-xl border border-slate-200 shadow-sm transition-all relative overflow-hidden group
-          ${
-            onClick
-              ? "hover:shadow-md hover:border-indigo-300 cursor-pointer"
-              : ""
-          }`}
-      >
-        {onClick && (
-          <div className="absolute top-0 left-0 w-1 h-full bg-indigo-500 opacity-0 group-hover:opacity-100 transition-opacity" />
-        )}
-
-        <div className="flex justify-between items-start mb-4">
-          <span
-            className={`inline-block px-2.5 py-0.5 rounded-md text-xs font-bold uppercase tracking-wider ${
-              okr.category === "Business"
-                ? "bg-blue-100 text-blue-700"
-                : okr.category === "Personal"
-                ? "bg-purple-100 text-purple-700"
-                : okr.category === "Health"
-                ? "bg-green-100 text-green-700"
-                : "bg-orange-100 text-orange-700"
-            }`}
-          >
-            {okr.category === "Business"
-              ? "Negocios"
-              : okr.category === "Personal"
-              ? "Personal"
-              : okr.category === "Health"
-              ? "Salud"
-              : "Aprendizaje"}
-          </span>
-          {onClick && (
-            <ChevronRight className="w-5 h-5 text-slate-300 group-hover:text-indigo-500 transition-colors" />
-          )}
-        </div>
-
-        <h3 className="font-bold text-lg text-slate-800 mb-4 line-clamp-2 h-14 leading-tight">
-          {okr.title}
-        </h3>
-
-        <div className="space-y-3">
-          <div className="flex justify-between text-sm text-slate-500">
-            <span>Progreso general</span>
-            <span
-              className={`font-bold ${
-                progress >= 70
-                  ? "text-emerald-600"
-                  : progress >= 40
-                  ? "text-amber-500"
-                  : "text-slate-600"
-              }`}
-            >
-              {progress}%
-            </span>
-          </div>
-          <div className="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden">
-            <div
-              className={`h-full rounded-full transition-all duration-1000 ease-out ${
-                progress >= 70
-                  ? "bg-emerald-500"
-                  : progress >= 40
-                  ? "bg-amber-500"
-                  : "bg-indigo-500"
-              }`}
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-          {!readOnly && (
-            <div className="text-xs text-slate-400 pt-1 flex justify-between items-center">
-              <span>{okr.keyResults.length} Key Results</span>
-              {okr.lastCoaching && (
-                <span className="text-indigo-600 font-medium">
-                  Feedback recibido
-                </span>
-              )}
-            </div>
-          )}
-          {readOnly && (
-            <div className="text-xs text-slate-400 pt-1">
-              {okr.keyResults.length} KRs definidos
-            </div>
-          )}
-        </div>
+      <div className="min-h-screen flex items-center justify-center bg-slate-900 text-white">
+        Cargando...
       </div>
     );
-  };
+  }
+
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-900 text-white">
+        No se encontró usuario actual (revisa tabla profiles).
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 pb-20 font-sans">
-      {/* Toast Container */}
-      <div className="fixed bottom-4 right-4 z-[60] flex flex-col gap-2">
-        {toasts.map((toast) => (
-          <div
-            key={toast.id}
-            className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-white font-medium text-sm animate-fadeIn ${
-              toast.type === "success" ? "bg-slate-800" : "bg-red-500"
-            }`}
-          >
-            {toast.type === "success" ? (
-              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-            ) : (
-              <XCircle className="w-4 h-4" />
-            )}
-            {toast.message}
-          </div>
-        ))}
-      </div>
-
+    <div className="min-h-screen bg-slate-950 text-slate-50">
       {/* Header */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-20 shadow-sm">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-          <div
-            className="flex items-center gap-2 font-bold text-xl text-indigo-600 cursor-pointer hover:opacity-80 transition-opacity"
-            onClick={() => {
-              setView("dashboard");
-              setEditingOkrId(null);
-              setActiveTab("my-okrs");
-            }}
-          >
-            <Trophy className="w-6 h-6" />
-            <span className="hidden sm:inline">OKR Master AI</span>
-            <span className="sm:hidden">OKR AI</span>
+      <header className="border-b border-slate-800 bg-slate-950/80 backdrop-blur sticky top-0 z-20">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center justify-center w-9 h-9 rounded-xl bg-indigo-600">
+              <Target className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-lg font-semibold tracking-tight">
+                  OKR Master AI
+                </h1>
+                <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-emerald-300">
+                  <Trophy className="w-3 h-3" />
+                  Beta
+                </span>
+              </div>
+              <p className="text-xs text-slate-400">
+                Transparencia por rol · Cascada por adopción de KRs
+              </p>
+            </div>
           </div>
 
-          <div className="flex gap-4 items-center">
-            {/* Info de usuario simple */}
-            <div className="flex items-center gap-2 bg-slate-100 rounded-lg px-3 py-1">
+          <div className="flex items-center gap-3">
+            {/* Selector de usuario (para probar los 4 perfiles) */}
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-400 hidden sm:inline">
+                Actuando como:
+              </span>
+              <select
+                value={currentUser.id}
+                onChange={(e) => handleUserChange(e.target.value)}
+                className="bg-slate-900 border border-slate-700 rounded-lg text-xs px-2 py-1"
+              >
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} ({p.role})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex items-center gap-2 pl-3 border-l border-slate-800">
               <div
-                className={`w-8 h-8 rounded-md flex items-center justify-center text-xs font-bold ${currentUser.color}`}
+                className={`w-8 h-8 rounded-xl flex items-center justify-center text-xs font-semibold ${currentUser.color}`}
               >
                 {currentUser.avatar}
               </div>
-              <div className="flex flex-col">
-                <span className="text-sm font-medium text-slate-700">
+              <div className="hidden sm:flex flex-col">
+                <span className="text-xs font-medium">
                   {currentUser.name}
                 </span>
-                <span className="text-[11px] text-slate-500">
+                <span className="text-[10px] text-slate-400">
                   {currentUser.role}
                 </span>
               </div>
-            </div>
-
-            {/* Botón Salir */}
-            <button
-              onClick={handleLogout}
-              className="text-slate-500 hover:text-red-600 text-xs sm:text-sm flex items-center gap-1 border border-slate-200 hover:border-red-200 rounded-lg px-2 py-1"
-            >
-              <LogOut className="w-3 h-3" />
-              <span className="hidden sm:inline">Salir</span>
-            </button>
-
-            {/* Botón Reporte */}
-            {view === "dashboard" &&
-              myOkrs.length > 0 &&
-              activeTab === "my-okrs" && (
-                <button
-                  onClick={() => setShowReport(true)}
-                  className="text-slate-600 hover:text-indigo-600 text-sm font-medium py-2 px-3 rounded-lg flex items-center gap-2 transition-colors border border-transparent hover:border-slate-200 hover:bg-slate-50"
-                >
-                  <FileText className="w-4 h-4" />
-                  <span className="hidden sm:inline">Reporte</span>
-                </button>
-              )}
-
-            {/* Botón Nuevo OKR */}
-            {view === "dashboard" && activeTab === "my-okrs" && (
-              <button
-                onClick={() => {
-                  setEditingOkrId(null);
-                  setDraftOkr(undefined);
-                  setView("create");
-                }}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold py-2 px-4 rounded-lg flex items-center gap-2 transition-colors shadow-sm"
-              >
-                <PlusCircle className="w-4 h-4" />
-                <span className="hidden sm:inline">Nuevo OKR</span>
-                <span className="sm:hidden">Nuevo</span>
+              <button className="ml-2 p-1.5 rounded-lg hover:bg-slate-800">
+                <LogOut className="w-4 h-4 text-slate-400" />
               </button>
-            )}
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* Tabs + acciones */}
+      <main className="max-w-6xl mx-auto px-4 py-4 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          {/* Tabs */}
+          <div className="inline-flex rounded-full bg-slate-900/60 border border-slate-800 p-1">
+            {availableTabs.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`px-3 py-1.5 text-xs rounded-full inline-flex items-center gap-1 ${
+                  activeTab === tab.id
+                    ? "bg-slate-100 text-slate-900 shadow-sm"
+                    : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/80"
+                }`}
+              >
+                {tab.id === "my-okrs" && <Layout className="w-3 h-3" />}
+                {tab.id === "team-okrs" && <UsersIcon />}
+                {tab.id === "owner-okrs" && <CrownIcon />}
+                {tab.id === "all-okrs" && <GlobeIcon />}
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Acciones */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setIsMonthlyReportOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 px-2.5 py-1.5 text-[11px] text-slate-200 hover:bg-slate-800"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              Reporte mensual
+            </button>
+            <button
+              onClick={() => setIsWizardOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-2.5 py-1.5 text-[11px] font-medium text-white shadow hover:bg-indigo-500"
+            >
+              <PlusCircle className="w-3.5 h-3.5" />
+              Nuevo OKR
+            </button>
           </div>
         </div>
 
-        {/* Tabs: ahora dinámicos según appRole */}
-        {view === "dashboard" && (
-          <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="flex space-x-6 overflow-x-auto no-scrollbar">
-              {availableTabs
-                .filter((t) => tabsForUser.includes(t.id))
-                .map((tab) => (
-                  <button
-                    key={tab.id}
-                    onClick={() => setActiveTab(tab.id)}
-                    className={`py-3 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap ${
-                      activeTab === tab.id
-                        ? "border-indigo-600 text-indigo-600"
-                        : "border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300"
-                    }`}
-                  >
-                    {/* Iconito según el tab */}
-                    {tab.id === "my-okrs" && <Layout className="w-4 h-4" />}
-                    {tab.id === "team" && <Target className="w-4 h-4" />}
-                    {tab.id === "alignment" && <Layout className="w-4 h-4" />}
-                    {tab.id === "reports" && <FileText className="w-4 h-4" />}
-
-                    {tab.label}
-                    {tab.id === "my-okrs" && ` (${myOkrs.length})`}
-                  </button>
-                ))}
+        {/* Lista de OKRs */}
+        <section className="space-y-3">
+          {loading && (
+            <div className="text-sm text-slate-400">
+              Cargando OKRs visibles...
             </div>
-          </div>
-        )}
-      </header>
+          )}
 
-      <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {view === "dashboard" && (
-          <div className="space-y-6 animate-fadeIn">
-            {/* MY OKRS TAB */}
-            {activeTab === "my-okrs" && (
-              <>
-                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4 mb-2">
-                  <div>
-                    <h1 className="text-2xl font-bold text-slate-900">
-                      Hola, {currentUser.name.split(" ")[0]}
-                    </h1>
-                    <p className="text-slate-500 mt-1">
-                      Aquí están tus objetivos para este ciclo.
-                    </p>
-                  </div>
-                </div>
+          {!loading && visibleObjectivesByTab.length === 0 && (
+            <div className="border border-dashed border-slate-700 rounded-xl p-6 text-sm text-slate-400 flex flex-col items-center justify-center gap-2">
+              <Target className="w-5 h-5 text-slate-500" />
+              <span>No hay OKRs en esta vista.</span>
+              <span className="text-xs text-slate-500">
+                Crea uno nuevo o cambia de pestaña.
+              </span>
+            </div>
+          )}
 
-                {isLoadingOkrs ? (
-                  <div className="text-slate-500 text-sm">
-                    Cargando tus OKRs...
-                  </div>
-                ) : myOkrs.length === 0 ? (
-                  <div className="text-center py-20 bg-white rounded-2xl border border-dashed border-slate-300 shadow-sm">
-                    <div className="bg-indigo-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
-                      <Target className="w-8 h-8 text-indigo-500" />
+          <div className="grid md:grid-cols-2 gap-3">
+            {visibleObjectivesByTab.map((obj: any) => {
+              const ownerId = getOwnerIdFromObjective(obj);
+              const ownerProfile =
+                profiles.find((p) => p.id === ownerId) || null;
+
+              return (
+                <button
+                  key={obj.id}
+                  onClick={() => setSelectedObjective(obj)}
+                  className="w-full text-left rounded-xl border border-slate-800 bg-slate-900/60 hover:bg-slate-900 transition p-4 flex flex-col gap-2"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <div className="w-7 h-7 rounded-lg bg-slate-800 flex items-center justify-center">
+                        <Target className="w-4 h-4 text-indigo-400" />
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-sm font-semibold line-clamp-1">
+                          {obj.title}
+                        </span>
+                        {ownerProfile && (
+                          <span className="text-[11px] text-slate-400">
+                            Owner: {ownerProfile.name} ({ownerProfile.role})
+                          </span>
+                        )}
+                      </div>
                     </div>
-                    <h3 className="text-lg font-medium text-slate-900">
-                      No tienes OKRs aún
-                    </h3>
-                    <p className="text-slate-500 mt-2 mb-6 max-w-sm mx-auto">
-                      Crea tu primer OKR y deja que la IA te ayude a aterrizar
-                      tus metas.
+                    <ChevronRight className="w-4 h-4 text-slate-500" />
+                  </div>
+
+                  {obj.description && (
+                    <p className="text-xs text-slate-400 line-clamp-2">
+                      {obj.description}
                     </p>
-                    <button
-                      onClick={() => setView("create")}
-                      className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-6 rounded-lg shadow-md transition-all hover:-translate-y-0.5"
-                    >
-                      Crear mi primer OKR
-                    </button>
+                  )}
+
+                  <div className="flex items-center justify-between mt-1">
+                    <div className="flex items-center gap-2 text-[11px] text-slate-400">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>{obj.cycle || "Ciclo actual"}</span>
+                    </div>
+                    <div className="flex items-center gap-1 text-[11px]">
+                      <span className="px-2 py-0.5 rounded-full bg-slate-800 text-slate-200">
+                        {obj.status || "En progreso"}
+                      </span>
+                    </div>
                   </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {myOkrs.map((okr) =>
-                      renderOkrCard(okr, () => {
-                        setSelectedOkrId(okr.id);
-                        setView("detail");
-                      })
-                    )}
-                  </div>
-                )}
-              </>
-            )}
-
-            {/* TEAM TAB (placeholder por ahora) */}
-            {activeTab === "team" && (
-              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-                <h2 className="text-xl font-bold text-slate-900 mb-2">
-                  Mi equipo
-                </h2>
-                <p className="text-slate-500 text-sm">
-                  Aquí podrás ver los OKRs de tu equipo cuando conectemos la
-                  lógica de manager/colaboradores. Por ahora, esta sección es
-                  solo visible para <strong>Managers</strong> y{" "}
-                  <strong>Owners</strong>.
-                </p>
-              </div>
-            )}
-
-            {/* ALIGNMENT TAB (placeholder) */}
-            {activeTab === "alignment" && (
-              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-                <h2 className="text-xl font-bold text-slate-900 mb-2">
-                  Alineación
-                </h2>
-                <p className="text-slate-500 text-sm">
-                  Vista de alineación de objetivos a nivel organización. Solo
-                  Owners pueden ver esta pestaña. Más adelante aquí puedes
-                  mostrar cómo los OKRs se conectan entre sí.
-                </p>
-              </div>
-            )}
-
-            {/* REPORTS TAB (placeholder) */}
-            {activeTab === "reports" && (
-              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-                <h2 className="text-xl font-bold text-slate-900 mb-2">
-                  Reportes
-                </h2>
-                <p className="text-slate-500 text-sm">
-                  Espacio para reportes ejecutivos, resúmenes mensuales y
-                  exportables. Por ahora está como placeholder, pero solo es
-                  visible para Owners.
-                </p>
-              </div>
-            )}
+                </button>
+              );
+            })}
           </div>
-        )}
-
-        {view === "create" && (
-          <Wizard
-            initialData={okrToEdit}
-            onSave={handleSaveOkr}
-            onCancel={handleCancelWizard}
-          />
-        )}
-
-        {view === "detail" && selectedOkr && (
-          <OkrDetail
-            objective={selectedOkr}
-            onBack={() => setView("dashboard")}
-            onUpdate={handleUpdateOkr}
-            onDelete={handleDeleteOkr}
-            onEdit={handleEditOkr}
-          />
-        )}
+        </section>
       </main>
 
-      {showReport && (
-        <MonthlyReportModal
-          objectives={myOkrs}
-          onClose={() => setShowReport(false)}
+      {/* Wizard para crear OKR */}
+      {isWizardOpen && (
+        <Wizard
+          isOpen={isWizardOpen}
+          onClose={() => setIsWizardOpen(false)}
+          currentUser={currentUser}
+          onCreated={handleObjectiveCreated}
         />
       )}
+
+      {/* Detalle de OKR */}
+      {selectedObjective && (
+        <OkrDetail
+          objective={selectedObjective}
+          onClose={() => setSelectedObjective(null)}
+          // Si en tu OkrDetail pintas KRs, puedes pasar adoptKr vía props
+          // y usarla allí para poner el botón "Adoptar KR" en cada uno.
+          adoptKr={adoptKr}
+          canAdoptFrom={canCurrentUserAdoptFrom}
+        />
+      )}
+
+      {/* Modal de reporte mensual */}
+      {isMonthlyReportOpen && (
+        <MonthlyReportModal
+          isOpen={isMonthlyReportOpen}
+          onClose={() => setIsMonthlyReportOpen(false)}
+          objectives={objectives}
+          currentUser={currentUser}
+        />
+      )}
+
+      {/* Toasts */}
+      <div className="fixed bottom-4 right-4 space-y-2 z-30">
+        {toasts.map((toast) => (
+          <div
+            key={toast.id}
+            className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-xs shadow-lg ${
+              toast.type === "success"
+                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-100"
+                : "border-red-500/40 bg-red-500/10 text-red-100"
+            }`}
+          >
+            {toast.type === "success" ? (
+              <CheckCircle2 className="w-3.5 h-3.5" />
+            ) : (
+              <XCircle className="w-3.5 h-3.5" />
+            )}
+            <span>{toast.message}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
+
+// ------------------------------------------------------
+// Funciones auxiliares (visibilidad y adopción)
+// ------------------------------------------------------
+async function fetchVisibleObjectives(
+  currentUser: User,
+  profiles: User[]
+): Promise<Objective[]> {
+  const visibleIds = new Set<string>();
+
+  // Siempre veo mis propios OKRs
+  visibleIds.add(currentUser.id);
+
+  // Owner
+  const owner = profiles.find((p) => p.role === "Owner");
+  if (owner) {
+    visibleIds.add(owner.id);
+  }
+
+  // OWNER ve todo
+  if (currentUser.role === "Owner") {
+    profiles.forEach((p) => visibleIds.add(p.id));
+  } else if (currentUser.role === "HR Director") {
+    // HR Director ve su equipo directo
+    const team = profiles.filter((p) => p.managerId === currentUser.id);
+    team.forEach((p) => visibleIds.add(p.id));
+  } else {
+    // Reporte directo ve a su jefe
+    const myProfile = profiles.find((p) => p.id === currentUser.id);
+    const managerId = myProfile?.managerId ?? currentUser.managerId;
+    if (managerId) {
+      visibleIds.add(managerId);
+    }
+  }
+
+  const { data, error } = await supabase
+    .from("objectives") // CAMBIA a "okrs" si tu tabla se llama así
+    .select("*")
+    .in("owner_id", Array.from(visibleIds));
+
+  if (error || !data) {
+    console.error("Error fetching objectives:", error);
+    return [];
+  }
+
+  return data as Objective[];
+}
+
+function filterObjectivesByTab(
+  objectives: Objective[],
+  tab: TabView,
+  currentUser: User | null,
+  profiles: User[]
+): Objective[] {
+  if (!currentUser) return [];
+
+  const ownerId = (o: any) => getOwnerIdFromObjective(o);
+
+  if (currentUser.role === "Owner") {
+    if (tab === "all-okrs") return objectives;
+    if (tab === "my-okrs")
+      return objectives.filter((o) => ownerId(o) === currentUser.id);
+  }
+
+  switch (tab) {
+    case "my-okrs":
+      return objectives.filter((o) => ownerId(o) === currentUser.id);
+
+    case "team-okrs":
+      if (currentUser.role === "HR Director") {
+        const teamIds = profiles
+          .filter((p) => p.managerId === currentUser.id)
+          .map((p) => p.id);
+        return objectives.filter((o) => teamIds.includes(ownerId(o)));
+      } else {
+        const manager = profiles.find((p) => p.id === currentUser.managerId);
+        if (!manager) return [];
+        return objectives.filter((o) => ownerId(o) === manager.id);
+      }
+
+    case "owner-okrs": {
+      const ownerProfile = profiles.find((p) => p.role === "Owner");
+      if (!ownerProfile) return [];
+      return objectives.filter((o) => ownerId(o) === ownerProfile.id);
+    }
+
+    case "all-okrs":
+      return objectives;
+
+    default:
+      return objectives;
+  }
+}
+
+// Regla de negocio para adopción de KR
+function canUserAdoptFrom(
+  currentUser: User,
+  sourceOwnerId: string,
+  profiles: User[]
+): boolean {
+  if (currentUser.role === "Owner") return false;
+
+  const sourceOwner = profiles.find((p) => p.id === sourceOwnerId);
+  if (!sourceOwner) return false;
+
+  const ownerProfile = profiles.find((p) => p.role === "Owner");
+
+  // HR Director puede adoptar KRs del Owner
+  if (currentUser.role === "HR Director") {
+    return ownerProfile ? sourceOwnerId === ownerProfile.id : false;
+  }
+
+  // Reporte directo solo puede adoptar de su jefe directo
+  if (currentUser.role === "Employee") {
+    return currentUser.managerId === sourceOwnerId;
+  }
+
+  return false;
+}
+
+// Iconos simples para tabs
+const UsersIcon = () => (
+  <svg
+    className="w-3.5 h-3.5"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+  >
+    <path d="M16 21v-2a4 4 0 0 0-3-3.87" />
+    <path d="M7 21v-2a4 4 0 0 1 3-3.87" />
+    <circle cx="9" cy="7" r="3" />
+    <circle cx="17" cy="7" r="3" />
+  </svg>
+);
+
+const CrownIcon = () => (
+  <svg
+    className="w-3.5 h-3.5"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+  >
+    <path d="M3 11l4-7 5 4 5-4 4 7" />
+    <path d="M4 19h16" />
+  </svg>
+);
+
+const GlobeIcon = () => (
+  <svg
+    className="w-3.5 h-3.5"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+  >
+    <circle cx="12" cy="12" r="9" />
+    <path d="M3 12h18" />
+    <path d="M12 3a15.3 15.3 0 0 1 4 9 15.3 15.3 0 0 1-4 9 15.3 15.3 0 0 1-4-9 15.3 15.3 0 0 1 4-9z" />
+  </svg>
+);
 
 export default App;
