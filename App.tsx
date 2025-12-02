@@ -43,9 +43,9 @@ type DBProfile = {
   id: string;
   full_name: string | null;
   role: string | null; // job title
-  app_role: string | null; // "owner" | "manager" | "employee"
+  app_role: string | null; // "owner" | "manager" | "employee" (puede venir con mayúscula)
   organization_id: string | null;
-  manager_id: string | null;
+  manager_id: string | null; // 👈 relación de reporting
   created_at: string;
 };
 
@@ -69,6 +69,7 @@ type DBKeyResultRow = {
 };
 
 // Tipo de OKR que se edita/crea en el wizard
+// NOTA: aquí excluimos ownerId para no pisarlo al actualizar
 type EditableObjective = Omit<
   Objective,
   "id" | "createdAt" | "lastCoaching" | "ownerId" | "organizationId"
@@ -94,7 +95,8 @@ const mapDbToObjective = (
   return {
     id: obj.id,
     ownerId: obj.owner_id,
-    // @ts-ignore si Objective no tiene organizationId
+    // si en tu tipo Objective tienes organizationId, lo usamos; si no, TS lo ignorará
+    // @ts-ignore
     organizationId: obj.organization_id ?? undefined,
     title: obj.title,
     category: obj.category as Objective["category"],
@@ -121,7 +123,7 @@ function App() {
   const [currentUser, setCurrentUser] = useState<User>(DEFAULT_USER);
   const [organizationId, setOrganizationId] = useState<string | null>(null);
 
-  // Data State
+  // Data State (ya no usamos localStorage como fuente principal)
   const [allObjectives, setAllObjectives] = useState<Objective[]>([]);
   const [selectedOkrId, setSelectedOkrId] = useState<string | null>(null);
   const [editingOkrId, setEditingOkrId] = useState<string | null>(null);
@@ -160,7 +162,7 @@ function App() {
         let orgId: string | null = null;
         let appRole: AppRole = "employee";
 
-        // Intentar leer profile real
+        // Intentar leer profile real (ahora con manager_id)
         const { data: profile, error: profileError } = await supabase
           .from("profiles")
           .select(
@@ -216,24 +218,24 @@ function App() {
     loadCurrentUser();
   }, []);
 
-  // ---- CARGAR OKRs DESDE SUPABASE (CON VISIBILIDAD POR ROL/REPORTING) ----
+  // ---- CARGAR OKRs DESDE SUPABASE (visibilidad por rol + manager + owner) ----
   useEffect(() => {
     const loadOkrs = async () => {
       if (!currentUser.id || currentUser.id === DEFAULT_USER.id) return;
 
       setIsLoadingOkrs(true);
       try {
-        // 1) Perfiles de la organización para calcular qué IDs de owner podemos ver
-        let profileQuery = supabase
+        // 1) Leer perfiles de la organización para construir visibilidad
+        let profilesQuery = supabase
           .from("profiles")
           .select("id, app_role, manager_id, organization_id");
 
         if (organizationId) {
-          profileQuery = profileQuery.eq("organization_id", organizationId);
+          profilesQuery = profilesQuery.eq("organization_id", organizationId);
         }
 
         const { data: profilesData, error: profilesError } =
-          await profileQuery;
+          await profilesQuery;
 
         if (profilesError) {
           console.warn(
@@ -249,6 +251,7 @@ function App() {
         visibleOwnerIds.add(currentUser.id);
 
         if (profiles.length > 0) {
+          // Owner (app_role = 'owner')
           const ownerProfile = profiles.find(
             (p) => normalizeAppRole(p.app_role) === "owner"
           );
@@ -256,20 +259,20 @@ function App() {
             visibleOwnerIds.add(ownerProfile.id);
           }
 
-          const myProfile = profiles.find((p) => p.id === currentUser.id);
+          const meProfile = profiles.find((p) => p.id === currentUser.id);
 
           if (currentUser.appRole === "owner") {
-            // Owner ve TODOS los perfiles de la org
+            // Owner ve TODOS los perfiles de la organización
             profiles.forEach((p) => visibleOwnerIds.add(p.id));
           } else if (currentUser.appRole === "manager") {
-            // Manager ve su equipo directo
+            // Manager ve su equipo directo + Owner (ya agregado)
             const team = profiles.filter(
               (p) => p.manager_id === currentUser.id
             );
             team.forEach((p) => visibleOwnerIds.add(p.id));
           } else {
-            // Employee: ve a su jefe directo
-            const managerId = myProfile?.manager_id;
+            // Employee: ve a su jefe directo + Owner (ya agregado)
+            const managerId = meProfile?.manager_id;
             if (managerId) {
               visibleOwnerIds.add(managerId);
             }
@@ -343,27 +346,20 @@ function App() {
     loadOkrs();
   }, [currentUser.id, currentUser.appRole, organizationId]);
 
-  // Persistencia local opcional
+  // Persistencia en localStorage solo como backup/caché (opcional)
   useEffect(() => {
     if (typeof window !== "undefined") {
-      window.localStorage.setItem(
-        "okr-master-db",
-        JSON.stringify(allObjectives)
-      );
+      window.localStorage.setItem("okr-master-db", JSON.stringify(allObjectives));
     }
   }, [allObjectives]);
 
-  // Mis OKRs
-  const myOkrs = useMemo(() => {
-    // Owner ve todos los OKRs que tiene visibilidad
-    if (currentUser.appRole === "owner") {
-      return allObjectives;
-    }
-    // Manager / employee ven solo los suyos aquí
-    return allObjectives.filter((o) => o.ownerId === currentUser.id);
-  }, [allObjectives, currentUser]);
+  // Mis OKRs (solo del usuario actual)
+  const myOkrs = useMemo(
+    () => allObjectives.filter((o) => o.ownerId === currentUser.id),
+    [allObjectives, currentUser]
+  );
 
-  // OKRs de "equipo / jefe / owner" (lo que no es mío)
+  // OKRs de "equipo/jefe/owner" (todo lo que no es mío)
   const teamOkrs = useMemo(
     () => allObjectives.filter((o) => o.ownerId !== currentUser.id),
     [allObjectives, currentUser]
@@ -379,10 +375,10 @@ function App() {
 
   // 👉 Tabs visibles según rol en la app
   const tabsForUser = useMemo(() => {
-    // Todos ven "Mis OKRs" y "Mi equipo"
+    // Todos ven Mis OKRs + Mi equipo
     const tabs: TabView[] = ["my-okrs", "team"];
 
-    // Solo owner ve Alignment y Reports
+    // Solo el owner ve Alignment y Reports
     if (currentUser.appRole === "owner") {
       tabs.push("alignment", "reports");
     }
@@ -416,11 +412,11 @@ function App() {
     }
   };
 
-  // ---- CREAR / ACTUALIZAR OKR ----
+  // ---- CREAR / ACTUALIZAR OKR (OBJECTIVES + KEY_RESULTS) ----
   const handleSaveOkr = async (partialOkr: EditableObjective) => {
     try {
       if (editingOkrId) {
-        // UPDATE
+        // UPDATE EXISTING OBJECTIVE
         const { error: updError } = await supabase
           .from("objectives")
           .update({
@@ -435,7 +431,7 @@ function App() {
           return;
         }
 
-        // Borrar KRs
+        // Borramos todos los KRs y los reinsertamos
         const { error: delError } = await supabase
           .from("key_results")
           .delete()
@@ -473,7 +469,7 @@ function App() {
           }
         }
 
-        // Volver a leer
+        // Volvemos a leer el objective actualizado
         const { data: objData, error: objError } = await supabase
           .from("objectives")
           .select(
@@ -498,7 +494,7 @@ function App() {
 
         setEditingOkrId(null);
       } else {
-        // CREATE
+        // CREATE NEW OBJECTIVE
         const { data: objData, error: objError } = await supabase
           .from("objectives")
           .insert({
@@ -559,8 +555,9 @@ function App() {
     setView("dashboard");
   };
 
-  // ---- ACTUALIZAR DESDE DETAIL ----
+  // ---- ACTUALIZAR PROGRESO / DETALLE DESDE OKR DETAIL ----
   const handleUpdateOkr = async (updatedOkr: Objective) => {
+    // Optimista en UI
     setAllObjectives((prev) =>
       prev.map((o) => (o.id === updatedOkr.id ? updatedOkr : o))
     );
@@ -578,6 +575,7 @@ function App() {
         console.error("Error actualizando objective:", updError.message);
       }
 
+      // Simplificación: borramos KRs y los reinsertamos
       const { error: delError } = await supabase
         .from("key_results")
         .delete()
@@ -602,10 +600,7 @@ function App() {
 
         if (insError) {
           console.error("Error reinsertando key_results:", insError.message);
-          showToast(
-            "Cambios guardados parcialmente (KRs con error)",
-            "error"
-          );
+          showToast("Cambios guardados parcialmente (KRs con error)", "error");
           return;
         }
       }
@@ -621,6 +616,7 @@ function App() {
     if (!window.confirm("¿Estás seguro de eliminar este OKR?")) return;
 
     try {
+      // Borrar KRs primero
       const { error: krError } = await supabase
         .from("key_results")
         .delete()
@@ -779,7 +775,7 @@ function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 pb-20 font-sans">
-      {/* Toasts */}
+      {/* Toast Container */}
       <div className="fixed bottom-4 right-4 z-[60] flex flex-col gap-2">
         {toasts.map((toast) => (
           <div
@@ -815,7 +811,7 @@ function App() {
           </div>
 
           <div className="flex gap-4 items-center">
-            {/* User info */}
+            {/* Info de usuario simple */}
             <div className="flex items-center gap-2 bg-slate-100 rounded-lg px-3 py-1">
               <div
                 className={`w-8 h-8 rounded-md flex items-center justify-center text-xs font-bold ${currentUser.color}`}
@@ -832,7 +828,7 @@ function App() {
               </div>
             </div>
 
-            {/* Logout */}
+            {/* Botón Salir */}
             <button
               onClick={handleLogout}
               className="text-slate-500 hover:text-red-600 text-xs sm:text-sm flex items-center gap-1 border border-slate-200 hover:border-red-200 rounded-lg px-2 py-1"
@@ -841,7 +837,7 @@ function App() {
               <span className="hidden sm:inline">Salir</span>
             </button>
 
-            {/* Reporte */}
+            {/* Botón Reporte */}
             {view === "dashboard" &&
               myOkrs.length > 0 &&
               activeTab === "my-okrs" && (
@@ -854,7 +850,7 @@ function App() {
                 </button>
               )}
 
-            {/* Nuevo OKR */}
+            {/* Botón Nuevo OKR */}
             {view === "dashboard" && activeTab === "my-okrs" && (
               <button
                 onClick={() => {
@@ -872,7 +868,7 @@ function App() {
           </div>
         </div>
 
-        {/* Tabs */}
+        {/* Tabs: ahora dinámicos según appRole */}
         {view === "dashboard" && (
           <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="flex space-x-6 overflow-x-auto no-scrollbar">
@@ -888,14 +884,11 @@ function App() {
                         : "border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300"
                     }`}
                   >
+                    {/* Iconito según el tab */}
                     {tab.id === "my-okrs" && <Layout className="w-4 h-4" />}
                     {tab.id === "team" && <Target className="w-4 h-4" />}
-                    {tab.id === "alignment" && (
-                      <Layout className="w-4 h-4" />
-                    )}
-                    {tab.id === "reports" && (
-                      <FileText className="w-4 h-4" />
-                    )}
+                    {tab.id === "alignment" && <Layout className="w-4 h-4" />}
+                    {tab.id === "reports" && <FileText className="w-4 h-4" />}
 
                     {tab.label}
                     {tab.id === "my-okrs" && ` (${myOkrs.length})`}
@@ -960,7 +953,7 @@ function App() {
               </>
             )}
 
-            {/* TEAM TAB */}
+            {/* TEAM TAB (ya con lógica de visibilidad) */}
             {activeTab === "team" && (
               <>
                 <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
@@ -979,7 +972,7 @@ function App() {
                     {currentUser.appRole === "manager" &&
                       "Incluye los OKRs de tu equipo directo y los del Owner."}
                     {currentUser.appRole === "employee" &&
-                      "Incluye los OKRs de tu jefe directo y los del Owner (los tuyos están en 'Mis OKRs')."}
+                      "Incluye los OKRs de tu jefe directo y los del Owner. Tus propios OKRs están en 'Mis OKRs'."}
                   </p>
                 </div>
 
@@ -1008,7 +1001,7 @@ function App() {
               </>
             )}
 
-            {/* ALIGNMENT TAB */}
+            {/* ALIGNMENT TAB (placeholder) */}
             {activeTab === "alignment" && (
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
                 <h2 className="text-xl font-bold text-slate-900 mb-2">
@@ -1022,7 +1015,7 @@ function App() {
               </div>
             )}
 
-            {/* REPORTS TAB */}
+            {/* REPORTS TAB (placeholder) */}
             {activeTab === "reports" && (
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
                 <h2 className="text-xl font-bold text-slate-900 mb-2">
