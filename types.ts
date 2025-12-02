@@ -14,7 +14,7 @@ export interface Objective {
   keyResults: KeyResult[];
   createdAt: number;
   lastCoaching?: string;
-  category: 'Business' | 'Personal' | 'Learning' | 'Health';
+  category: 'Business';
 }
 
 export interface User {
