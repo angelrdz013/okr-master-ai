@@ -45,7 +45,6 @@ type DBProfile = {
   role: string | null; // job title
   app_role: string | null; // "owner" | "manager" | "employee" (puede venir con mayúscula)
   organization_id: string | null;
-  manager_id: string | null; // 👈 relación de reporting
   created_at: string;
 };
 
@@ -123,7 +122,7 @@ function App() {
   const [currentUser, setCurrentUser] = useState<User>(DEFAULT_USER);
   const [organizationId, setOrganizationId] = useState<string | null>(null);
 
-  // Data State (ya no usamos localStorage como fuente principal)
+  // Data State
   const [allObjectives, setAllObjectives] = useState<Objective[]>([]);
   const [selectedOkrId, setSelectedOkrId] = useState<string | null>(null);
   const [editingOkrId, setEditingOkrId] = useState<string | null>(null);
@@ -162,11 +161,11 @@ function App() {
         let orgId: string | null = null;
         let appRole: AppRole = "employee";
 
-        // Intentar leer profile real (ahora con manager_id)
+        // Intentar leer profile real
         const { data: profile, error: profileError } = await supabase
           .from("profiles")
           .select(
-            "id, full_name, role, app_role, organization_id, manager_id, created_at"
+            "id, full_name, role, app_role, organization_id, created_at"
           )
           .eq("id", user.id)
           .maybeSingle<DBProfile>();
@@ -218,80 +217,25 @@ function App() {
     loadCurrentUser();
   }, []);
 
-  // ---- CARGAR OKRs DESDE SUPABASE (visibilidad por rol + manager + owner) ----
+  // ---- CARGAR OKRs DESDE SUPABASE (todos los de la organización) ----
   useEffect(() => {
     const loadOkrs = async () => {
       if (!currentUser.id || currentUser.id === DEFAULT_USER.id) return;
 
       setIsLoadingOkrs(true);
       try {
-        // 1) Leer perfiles de la organización para construir visibilidad
-        let profilesQuery = supabase
-          .from("profiles")
-          .select("id, app_role, manager_id, organization_id");
-
-        if (organizationId) {
-          profilesQuery = profilesQuery.eq("organization_id", organizationId);
-        }
-
-        const { data: profilesData, error: profilesError } =
-          await profilesQuery;
-
-        if (profilesError) {
-          console.warn(
-            "Error cargando profiles para visibilidad:",
-            profilesError.message
-          );
-        }
-
-        const profiles = (profilesData || []) as DBProfile[];
-
-        const visibleOwnerIds = new Set<string>();
-        // Siempre veo mis OKRs
-        visibleOwnerIds.add(currentUser.id);
-
-        if (profiles.length > 0) {
-          // Owner (app_role = 'owner')
-          const ownerProfile = profiles.find(
-            (p) => normalizeAppRole(p.app_role) === "owner"
-          );
-          if (ownerProfile) {
-            visibleOwnerIds.add(ownerProfile.id);
-          }
-
-          const meProfile = profiles.find((p) => p.id === currentUser.id);
-
-          if (currentUser.appRole === "owner") {
-            // Owner ve TODOS los perfiles de la organización
-            profiles.forEach((p) => visibleOwnerIds.add(p.id));
-          } else if (currentUser.appRole === "manager") {
-            // Manager ve su equipo directo + Owner (ya agregado)
-            const team = profiles.filter(
-              (p) => p.manager_id === currentUser.id
-            );
-            team.forEach((p) => visibleOwnerIds.add(p.id));
-          } else {
-            // Employee: ve a su jefe directo + Owner (ya agregado)
-            const managerId = meProfile?.manager_id;
-            if (managerId) {
-              visibleOwnerIds.add(managerId);
-            }
-          }
-        }
-
-        // 2) Traer objectives de todos los owner_ids visibles
-        let objQuery = supabase
+        let query = supabase
           .from("objectives")
           .select(
             "id, owner_id, organization_id, title, category, created_at"
-          )
-          .in("owner_id", Array.from(visibleOwnerIds)) as any;
+          ) as any;
 
+        // Si tenemos organization_id, filtramos por ahí (todos los OKRs de la org)
         if (organizationId) {
-          objQuery = objQuery.eq("organization_id", organizationId);
+          query = query.eq("organization_id", organizationId);
         }
 
-        const { data: dbObjectives, error: objError } = await objQuery.order(
+        const { data: dbObjectives, error: objError } = await query.order(
           "created_at",
           { ascending: false }
         );
@@ -344,7 +288,7 @@ function App() {
     };
 
     loadOkrs();
-  }, [currentUser.id, currentUser.appRole, organizationId]);
+  }, [currentUser.id, organizationId]);
 
   // Persistencia en localStorage solo como backup/caché (opcional)
   useEffect(() => {
@@ -359,7 +303,7 @@ function App() {
     [allObjectives, currentUser]
   );
 
-  // OKRs de "equipo/jefe/owner" (todo lo que no es mío)
+  // OKRs de "los demás" (equipo, jefe, owner, etc.)
   const teamOkrs = useMemo(
     () => allObjectives.filter((o) => o.ownerId !== currentUser.id),
     [allObjectives, currentUser]
@@ -375,7 +319,7 @@ function App() {
 
   // 👉 Tabs visibles según rol en la app
   const tabsForUser = useMemo(() => {
-    // Todos ven Mis OKRs + Mi equipo
+    // Todos ven Mis OKRs + Mi equipo (transparencia básica)
     const tabs: TabView[] = ["my-okrs", "team"];
 
     // Solo el owner ve Alignment y Reports
@@ -868,7 +812,7 @@ function App() {
           </div>
         </div>
 
-        {/* Tabs: ahora dinámicos según appRole */}
+        {/* Tabs: dinámicos según appRole */}
         {view === "dashboard" && (
           <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="flex space-x-6 overflow-x-auto no-scrollbar">
@@ -953,26 +897,17 @@ function App() {
               </>
             )}
 
-            {/* TEAM TAB (ya con lógica de visibilidad) */}
+            {/* TEAM TAB */}
             {activeTab === "team" && (
               <>
                 <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
                   <h2 className="text-xl font-bold text-slate-900 mb-2">
-                    {currentUser.appRole === "owner"
-                      ? "OKRs del equipo"
-                      : currentUser.appRole === "manager"
-                      ? "OKRs de mi equipo y del Owner"
-                      : "OKRs de mi jefe y del Owner"}
+                    Mi equipo / Jefes / Owner
                   </h2>
                   <p className="text-slate-500 text-sm">
-                    Aquí ves los OKRs que te dan contexto y transparencia:
-                    <br />
-                    {currentUser.appRole === "owner" &&
-                      "Todos los OKRs de la organización (excepto los tuyos en este tab)."}
-                    {currentUser.appRole === "manager" &&
-                      "Incluye los OKRs de tu equipo directo y los del Owner."}
-                    {currentUser.appRole === "employee" &&
-                      "Incluye los OKRs de tu jefe directo y los del Owner. Tus propios OKRs están en 'Mis OKRs'."}
+                    Aquí ves los OKRs de otras personas de tu organización.
+                    Tus propios OKRs están en la pestaña{" "}
+                    <strong>“Mis OKRs”</strong>.
                   </p>
                 </div>
 
@@ -982,7 +917,7 @@ function App() {
                   </div>
                 ) : teamOkrs.length === 0 ? (
                   <div className="bg-white rounded-2xl border border-dashed border-slate-300 shadow-sm p-6 text-sm text-slate-500">
-                    No hay OKRs adicionales visibles para tu rol por ahora.
+                    No hay OKRs adicionales visibles por ahora.
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
