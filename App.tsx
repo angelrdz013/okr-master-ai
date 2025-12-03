@@ -43,9 +43,8 @@ type DBProfile = {
   id: string;
   full_name: string | null;
   role: string | null; // job title
-  app_role: string | null; // "owner" | "manager" | "employee" | "hrdirector"
+  app_role: string | null; // "owner" | "manager" | "employee" (puede venir con mayúscula)
   organization_id: string | null;
-  manager_id: string | null; // <-- CAMBIO/ADICIÓN CLAVE: ID del jefe
   created_at: string;
 };
 
@@ -81,8 +80,7 @@ const normalizeAppRole = (
 ): AppRole | null => {
   if (!value) return null;
   const v = value.toString().toLowerCase();
-  // Incluimos 'hrdirector' en la lista de roles válidos
-  if (v === "owner" || v === "manager" || v === "employee" || v === "hrdirector") {
+  if (v === "owner" || v === "manager" || v === "employee") {
     return v as AppRole;
   }
   return null;
@@ -113,34 +111,6 @@ const mapDbToObjective = (
   };
 };
 
-// Helper: mapear filas de DBProfile a User del front
-const mapDbToUser = (profile: DBProfile): User => {
-  const fullName = profile.full_name || profile.id.split("-")[0];
-  const initials = fullName
-    .trim()
-    .split(" ")
-    .filter((p) => p.length > 0)
-    .map((p) => p[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
-
-  const appRole = normalizeAppRole(profile.app_role) || "employee";
-
-  return {
-    id: profile.id,
-    name: fullName,
-    role: profile.role || (appRole.charAt(0).toUpperCase() + appRole.slice(1)),
-    avatar: initials,
-    // Deberías asignar colores reales basados en el perfil si los tienes
-    color: "bg-indigo-600",
-    appRole: appRole,
-    // Asumimos que User tiene este campo, si no lo tiene, ignorar:
-    // @ts-ignore
-    managerId: profile.manager_id ?? undefined,
-  };
-};
-
 function App() {
   const [view, setView] = useState<"dashboard" | "create" | "detail">(
     "dashboard"
@@ -150,7 +120,6 @@ function App() {
 
   // User State
   const [currentUser, setCurrentUser] = useState<User>(DEFAULT_USER);
-  const [allUsers, setAllUsers] = useState<User[]>([]); // <-- NUEVO: Todos los usuarios
   const [organizationId, setOrganizationId] = useState<string | null>(null);
 
   // Data State
@@ -161,92 +130,91 @@ function App() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [isLoadingOkrs, setIsLoadingOkrs] = useState(false);
 
-  // ---- CARGAR USUARIO + TODOS LOS PROFILES DESDE SUPABASE ----
+  // ---- CARGAR USUARIO + PROFILE DESDE SUPABASE ----
   useEffect(() => {
-    const loadData = async () => {
+    const loadCurrentUser = async () => {
       try {
         const {
           data: { user },
           error,
         } = await supabase.auth.getUser();
 
-        if (error || !user) {
-          console.warn("No hay usuario autenticado o error:", error?.message);
+        if (error) {
+          console.error("Error obteniendo usuario de Supabase:", error.message);
+          return;
+        }
+        if (!user) {
+          console.warn("No hay usuario autenticado, usando DEFAULT_USER");
           return;
         }
 
-        let orgId: string | null = null;
-        let currentProfile: DBProfile | null = null;
+        const metadata = (user.user_metadata || {}) as any;
 
-        // 1. Cargar el profile del usuario actual
-        const { data: profileData, error: profileError } = await supabase
+        let fullName =
+          (metadata.full_name as string) ||
+          (metadata.name as string) ||
+          user.email?.split("@")[0] ||
+          "Mi usuario";
+
+        // role = Job Title
+        let role = (metadata.role as string) || "Owner";
+        let orgId: string | null = null;
+        let appRole: AppRole = "employee";
+
+        // Intentar leer profile real
+        const { data: profile, error: profileError } = await supabase
           .from("profiles")
           .select(
-            "id, full_name, role, app_role, organization_id, manager_id, created_at"
-          ) // <-- IMPORTANTE: Incluir manager_id
+            "id, full_name, role, app_role, organization_id, created_at"
+          )
           .eq("id", user.id)
           .maybeSingle<DBProfile>();
 
         if (profileError) {
           console.warn("Error cargando profile:", profileError.message);
-        } else if (profileData) {
-          currentProfile = profileData;
-          orgId = profileData.organization_id;
-        }
+        } else if (profile) {
+          if (profile.full_name) fullName = profile.full_name;
+          if (profile.role) role = profile.role;
+          if (profile.organization_id) orgId = profile.organization_id;
 
-        // 2. Si se encontró la organización, cargar TODOS los perfiles de la organización
-        let loadedUsers: User[] = [];
-        if (orgId) {
-          const { data: allProfiles, error: allProfilesError } = await supabase
-            .from("profiles")
-            .select(
-              "id, full_name, role, app_role, organization_id, manager_id, created_at"
-            )
-            .eq("organization_id", orgId);
-
-          if (allProfilesError) {
-            console.warn("Error cargando todos los profiles:", allProfilesError.message);
-          } else {
-            loadedUsers = (allProfiles || []).map(mapDbToUser);
-            setAllUsers(loadedUsers);
+          const normalizedProfileRole = normalizeAppRole(profile.app_role);
+          if (normalizedProfileRole) {
+            appRole = normalizedProfileRole;
           }
         }
-        
-        // 3. Establecer el currentUser final (usando profile o metadata de fallback)
-        if (currentProfile) {
-          setCurrentUser(mapDbToUser(currentProfile));
-        } else {
-          // Fallback usando metadata si no hay perfil de DB
-          const metadata = (user.user_metadata || {}) as any;
-          const fullName = metadata.full_name || user.email?.split("@")[0] || "Mi usuario";
-          const initials = fullName
-            .trim()
-            .split(" ")
-            .map((p) => p[0])
-            .join("")
-            .slice(0, 2)
-            .toUpperCase();
 
-          setCurrentUser({
-            id: user.id,
-            name: fullName,
-            role: metadata.role || "Employee",
-            avatar: initials,
-            color: "bg-indigo-600",
-            appRole: normalizeAppRole(metadata.app_role) || "employee",
-            // @ts-ignore
-            managerId: undefined, 
-          });
+        // Si no viene de profile, intentamos metadata
+        if (!profile?.app_role && metadata.app_role) {
+          const normalizedMetaRole = normalizeAppRole(metadata.app_role);
+          if (normalizedMetaRole) {
+            appRole = normalizedMetaRole;
+          }
         }
-        
-        setOrganizationId(orgId);
 
+        const initials = fullName
+          .trim()
+          .split(" ")
+          .filter((p) => p.length > 0)
+          .map((p) => p[0])
+          .join("")
+          .slice(0, 2)
+          .toUpperCase();
+
+        setCurrentUser({
+          id: user.id,
+          name: fullName,
+          role, // Job title
+          avatar: initials,
+          color: "bg-indigo-600",
+          appRole,
+        });
+        setOrganizationId(orgId);
       } catch (err) {
         console.error("Error inesperado cargando usuario:", err);
       }
     };
 
-    loadData();
+    loadCurrentUser();
   }, []);
 
   // ---- CARGAR OKRs DESDE SUPABASE (todos los de la organización) ----
@@ -265,9 +233,6 @@ function App() {
         // Si tenemos organization_id, filtramos por ahí (todos los OKRs de la org)
         if (organizationId) {
           query = query.eq("organization_id", organizationId);
-        } else {
-            // Si no hay organizationId (ej: solo 1 usuario), filtramos solo por el propio
-            query = query.eq("owner_id", currentUser.id);
         }
 
         const { data: dbObjectives, error: objError } = await query.order(
@@ -325,100 +290,45 @@ function App() {
     loadOkrs();
   }, [currentUser.id, organizationId]);
 
+  // Persistencia en localStorage solo como backup/caché (opcional)
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("okr-master-db", JSON.stringify(allObjectives));
+    }
+  }, [allObjectives]);
+
   // Mis OKRs (solo del usuario actual)
   const myOkrs = useMemo(
     () => allObjectives.filter((o) => o.ownerId === currentUser.id),
     [allObjectives, currentUser]
   );
-  
-  // IDs de los Owners (asumiendo que solo hay 1 Owner de App en este modelo simple)
-  const ownerId = useMemo(() => {
-    return allUsers.find(u => u.appRole === 'owner')?.id;
-  }, [allUsers]);
 
-  // IDs de los reportes directos del usuario actual
-  const directReportsIds = useMemo(() => {
-    // Si el usuario no es manager/hrdirector/owner, no tiene reportes directos que ver
-    if (currentUser.appRole === "employee") {
-      return [];
-    }
+  // OKRs de "los demás" (equipo, jefe, owner, etc.)
+  const teamOkrs = useMemo(
+    () => allObjectives.filter((o) => o.ownerId !== currentUser.id),
+    [allObjectives, currentUser]
+  );
 
-    // Filtra la lista de todos los usuarios para encontrar a quienes reportan al currentUser
-    return allUsers
-      // @ts-ignore - asumimos que managerId existe en User
-      .filter(u => u.managerId === currentUser.id)
-      .map(u => u.id);
-  }, [allUsers, currentUser.id, currentUser.appRole]);
-  
-  // IDs del jefe directo del usuario actual
-  const directManagerId = useMemo(() => {
-    // @ts-ignore - asumimos que managerId existe en User
-    return currentUser.managerId;
-  }, [currentUser.managerId]);
-
+  // 👉 Tabs disponibles
+  const availableTabs: { id: TabView; label: string }[] = [
+    { id: "my-okrs", label: "Mis OKRs" },
+    { id: "team", label: "Mi equipo" },
+    { id: "alignment", label: "Alineación" },
+    { id: "reports", label: "Reportes" },
+  ];
 
   // 👉 Tabs visibles según rol en la app
   const tabsForUser = useMemo(() => {
     // Todos ven Mis OKRs + Mi equipo (transparencia básica)
     const tabs: TabView[] = ["my-okrs", "team"];
 
-    // Solo el owner/hrdirector ve Alignment y Reports
-    if (currentUser.appRole === "owner" || currentUser.appRole === "hrdirector") {
+    // Solo el owner ve Alignment y Reports
+    if (currentUser.appRole === "owner") {
       tabs.push("alignment", "reports");
     }
 
     return tabs;
   }, [currentUser.appRole]);
-
-  // 👉 OKRs visibles en la pestaña 'team' / 'alignment' (LÓGICA CRÍTICA DE VISIBILIDAD)
-  const okrsForActiveTab = useMemo(() => {
-    
-    // Si no hay datos, retorna vacío
-    if (!allObjectives || allObjectives.length === 0) return [];
-    
-    // Si es 'my-okrs', usamos el filtro simple ya hecho
-    if (activeTab === "my-okrs") {
-      return myOkrs;
-    }
-
-    // Lista de Owner IDs cuyos OKRs son visibles para el currentUser
-    const visibleOwnerIds = new Set<string>();
-    
-    // 1. Lógica General para Reportes Directos (🟠) y HR Director (🟣)
-    if (currentUser.appRole === "employee" || currentUser.appRole === "hrdirector") {
-        
-        // a. Todos ven los OKRs del Owner (transparencia)
-        if (ownerId) {
-            visibleOwnerIds.add(ownerId);
-        }
-        
-        // b. Reporte Directo (🟠) / Employee: Ve los OKRs de su jefe directo
-        if (currentUser.appRole === "employee" && directManagerId) {
-            visibleOwnerIds.add(directManagerId);
-        }
-        
-        // c. HR Director (🟣): Ve los OKRs de su equipo directo
-        if (currentUser.appRole === "hrdirector") {
-            directReportsIds.forEach(id => visibleOwnerIds.add(id));
-        }
-    }
-    
-    // 2. Lógica para OWNER (🔵)
-    if (currentUser.appRole === "owner") {
-        // En la pestaña 'team', el Owner ve OKRs de todos los demás.
-        return allObjectives.filter(o => o.ownerId !== currentUser.id);
-    }
-    
-    // 3. Aplica los filtros de visibilidad
-    const finalVisibleIds = Array.from(visibleOwnerIds);
-    
-    // Filtra los OKRs: deben pertenecer a un owner visible Y NO ser los propios
-    return allObjectives.filter(o => 
-        finalVisibleIds.includes(o.ownerId) && o.ownerId !== currentUser.id
-    );
-    
-  }, [activeTab, allObjectives, currentUser.id, currentUser.appRole, ownerId, directManagerId, directReportsIds, myOkrs]);
-
 
   // Toast helper
   const showToast = (
@@ -716,10 +626,6 @@ function App() {
     readOnly: boolean = false
   ) => {
     const progress = calculateProgress(okr);
-    
-    // Encuentra el dueño del OKR para mostrar su nombre/avatar si no es el usuario actual
-    const owner = allUsers.find(u => u.id === okr.ownerId);
-
     return (
       <div
         key={okr.id}
@@ -765,16 +671,6 @@ function App() {
         </h3>
 
         <div className="space-y-3">
-          {owner && owner.id !== currentUser.id && (
-            <div className="flex items-center gap-2 text-xs font-medium text-slate-600">
-                <div
-                    className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${owner.color}`}
-                >
-                    {owner.avatar}
-                </div>
-                <span>{owner.name}</span>
-            </div>
-          )}
           <div className="flex justify-between text-sm text-slate-500">
             <span>Progreso general</span>
             <span
@@ -801,14 +697,21 @@ function App() {
               style={{ width: `${progress}%` }}
             />
           </div>
-          <div className="text-xs text-slate-400 pt-1 flex justify-between items-center">
-             <span>{okr.keyResults.length} Key Results</span>
-             {okr.lastCoaching && (
+          {!readOnly && (
+            <div className="text-xs text-slate-400 pt-1 flex justify-between items-center">
+              <span>{okr.keyResults.length} Key Results</span>
+              {okr.lastCoaching && (
                 <span className="text-indigo-600 font-medium">
                   Feedback recibido
                 </span>
               )}
-          </div>
+            </div>
+          )}
+          {readOnly && (
+            <div className="text-xs text-slate-400 pt-1">
+              {okr.keyResults.length} KRs definidos
+            </div>
+          )}
         </div>
       </div>
     );
@@ -933,7 +836,7 @@ function App() {
 
                     {tab.label}
                     {tab.id === "my-okrs" && ` (${myOkrs.length})`}
-                    {tab.id === "team" && ` (${okrsForActiveTab.length})`} {/* <-- Actualizado el contador */}
+                    {tab.id === "team" && ` (${teamOkrs.length})`}
                   </button>
                 ))}
             </div>
@@ -999,11 +902,12 @@ function App() {
               <>
                 <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
                   <h2 className="text-xl font-bold text-slate-900 mb-2">
-                    Objetivos de mi equipo y alineación
+                    Mi equipo / Jefes / Owner
                   </h2>
                   <p className="text-slate-500 text-sm">
-                    Aquí ves los OKRs de las personas relevantes en tu organización
-                    (jefes directos, Owner, y tus reportes si eres Manager/HR).
+                    Aquí ves los OKRs de otras personas de tu organización.
+                    Tus propios OKRs están en la pestaña{" "}
+                    <strong>“Mis OKRs”</strong>.
                   </p>
                 </div>
 
@@ -1011,13 +915,13 @@ function App() {
                   <div className="text-slate-500 text-sm">
                     Cargando OKRs del equipo...
                   </div>
-                ) : okrsForActiveTab.length === 0 ? (
+                ) : teamOkrs.length === 0 ? (
                   <div className="bg-white rounded-2xl border border-dashed border-slate-300 shadow-sm p-6 text-sm text-slate-500">
-                    No hay OKRs adicionales visibles por ahora según tu rol.
+                    No hay OKRs adicionales visibles por ahora.
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {okrsForActiveTab.map((okr) =>
+                    {teamOkrs.map((okr) =>
                       renderOkrCard(
                         okr,
                         () => {
@@ -1039,12 +943,13 @@ function App() {
                   Alineación
                 </h2>
                 <p className="text-slate-500 text-sm">
-                  Esta vista mostraría un árbol de OKRs de la organización.
-                  Viendo **{okrsForActiveTab.length}** OKRs totales cargados.
+                  Vista de alineación de objetivos a nivel organización. Solo
+                  Owners pueden ver esta pestaña. Más adelante aquí puedes
+                  mostrar cómo los OKRs se conectan entre sí.
                 </p>
               </div>
             )}
-            
+
             {/* REPORTS TAB (placeholder) */}
             {activeTab === "reports" && (
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
@@ -1052,47 +957,37 @@ function App() {
                   Reportes
                 </h2>
                 <p className="text-slate-500 text-sm">
-                  Aquí el Owner o HR Director podría ver estadísticas y reportes de progreso.
+                  Espacio para reportes ejecutivos, resúmenes mensuales y
+                  exportables. Por ahora está como placeholder, pero solo es
+                  visible para Owners.
                 </p>
               </div>
             )}
           </div>
         )}
 
-        {/* Create/Edit Wizard View */}
-        {(view === "create" || view === "detail") && (
-          <div className="animate-fadeIn">
-            {view === "create" && (
-              <Wizard
-                initialOkr={okrToEdit}
-                onSave={handleSaveOkr}
-                onCancel={handleCancelWizard}
-                mode={editingOkrId ? "edit" : "create"}
-              />
-            )}
+        {view === "create" && (
+          <Wizard
+            initialData={okrToEdit}
+            onSave={handleSaveOkr}
+            onCancel={handleCancelWizard}
+          />
+        )}
 
-            {view === "detail" && selectedOkr && (
-              <OkrDetail
-                okr={selectedOkr}
-                onBack={() => setView("dashboard")}
-                onUpdate={handleUpdateOkr}
-                onEdit={() => handleEditOkr(selectedOkr)}
-                onDelete={() => handleDeleteOkr(selectedOkr.id)}
-                // Pasa los datos necesarios para la lógica de permisos en el detalle
-                currentUser={currentUser}
-                ownerIsOwner={ownerId === selectedOkr.ownerId}
-                isMyManager={directManagerId === selectedOkr.ownerId}
-              />
-            )}
-          </div>
+        {view === "detail" && selectedOkr && (
+          <OkrDetail
+            objective={selectedOkr}
+            onBack={() => setView("dashboard")}
+            onUpdate={handleUpdateOkr}
+            onDelete={handleDeleteOkr}
+            onEdit={handleEditOkr}
+          />
         )}
       </main>
 
-      {/* Monthly Report Modal */}
       {showReport && (
         <MonthlyReportModal
-          okrs={myOkrs}
-          user={currentUser}
+          objectives={myOkrs}
           onClose={() => setShowReport(false)}
         />
       )}
